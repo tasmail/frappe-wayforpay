@@ -139,7 +139,7 @@ class TestWayForPay(FrappeTestCase):
 
 	def test_a_declined_payment_is_failed_and_an_unknown_reference_is_refused(self):
 		self.send(notification(self.order, transactionStatus="Declined", reasonCode=1101))
-		self.assertEqual(api.status(self.order), {"status": "Failed"})
+		self.assertEqual(api.status(self.order), {"status": "Failed", "redirect_to": None})
 
 		response, _pay = self.send(notification("nope"))
 		self.assertEqual(response.get("http_status_code"), 400)
@@ -176,3 +176,22 @@ class TestOnPaid(FrappeTestCase):
 
 	def test_an_order_with_nothing_to_tell_is_left_alone(self):
 		self.assertIsNone(api._pay({"amount": 1}, "ref1"))
+
+
+class TestFailedRedirect(FrappeTestCase):
+	def test_the_order_can_name_the_page_a_payer_goes_to_after_a_refusal(self):
+		frappe.set_user("Administrator")
+		gateway = settings()
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "x"}).insert().name
+		url = gateway.get_payment_url(
+			amount=10,
+			currency="UAH",
+			description="Order",
+			reference_doctype="ToDo",
+			reference_docname=todo,
+			failed_redirect="/dashboard/billing",
+		)
+		order = url.split("order=")[1]
+		frappe.db.set_value("Integration Request", order, "status", "Failed")
+
+		self.assertEqual(api.status(order), {"status": "Failed", "redirect_to": "/dashboard/billing"})

@@ -96,7 +96,7 @@ def returned():
 	reference = str(frappe.form_dict.get("orderReference") or "")
 	frappe.local.response["type"] = "redirect"
 	frappe.local.response["location"] = (
-		checkout.result_url(reference) if REFERENCE.match(reference) else get_url("/payment-failed")
+		checkout.result_url(reference) if REFERENCE.match(reference) else get_url("/")
 	)
 
 
@@ -108,7 +108,7 @@ def status(order: str):
 	request = frappe.db.get_value(
 		"Integration Request",
 		{"name": order, "integration_request_service": "WayForPay"},
-		["status", "output", "reference_doctype", "reference_docname"],
+		["status", "output", "reference_doctype", "reference_docname", "data"],
 		as_dict=True,
 	)
 	if not request:
@@ -120,4 +120,7 @@ def status(order: str):
 			"redirect_to": redirect
 			or f"/payment-success?doctype={request.reference_doctype}&docname={request.reference_docname}",
 		}
-	return {"status": "Failed" if request.status in ("Failed", "Cancelled") else "Pending"}
+	if request.status in ("Failed", "Cancelled"):
+		# the code that started the payment can say where a payer goes after a refusal (a site with no shop pages)
+		return {"status": "Failed", "redirect_to": json.loads(request.data or "{}").get("failed_redirect")}
+	return {"status": "Pending"}

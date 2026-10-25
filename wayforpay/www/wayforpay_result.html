@@ -18,7 +18,7 @@
 			.then(function (r) {
 				var result = r.message || {};
 				if (result.status === "Completed") { window.location.href = result.redirect_to || "/payment-success"; return; }
-				if (result.status === "Failed") { window.location.href = "/payment-failed"; return; }
+				if (result.status === "Failed") { window.location.href = result.redirect_to || "/payment-failed"; return; }
 				tries += 1;
 				if (tries > 30) { note.textContent = texts.late; return; }
 				setTimeout(check, 2000);
