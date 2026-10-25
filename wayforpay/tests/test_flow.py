@@ -63,12 +63,16 @@ class TestWayForPay(FrappeTestCase):
 		)
 		self.order = url.split("order=")[1]
 
+	def say(self, _order):
+		frappe.msgprint("Payment Entry created")  # what the booking of a payment says to the visitor
+		return "/orders/1"
+
 	def send(self, body):
 		frappe.local.response = frappe._dict()
 		request = SimpleNamespace(get_data=lambda as_text=True: body)
 		with (
 			mock.patch.object(frappe, "request", request),
-			mock.patch.object(api, "_pay", return_value="/orders/1") as pay,
+			mock.patch.object(api, "_pay", return_value="/orders/1", side_effect=self.say) as pay,
 		):
 			api.notify()
 		return frappe.local.response, pay
@@ -108,6 +112,7 @@ class TestWayForPay(FrappeTestCase):
 		response, pay = self.send(notification(self.order))
 
 		self.assertEqual(response["status"], "accept")
+		self.assertEqual(frappe.local.message_log, [])  # nothing but the answer goes to the gateway
 		self.assertEqual(
 			response["signature"], signature.sign(SECRET, [self.order, "accept", response["time"]])
 		)

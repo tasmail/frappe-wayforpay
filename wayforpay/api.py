@@ -16,6 +16,7 @@ REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 def _answer(settings, reference: str):
 	"""The body of the answer is the JSON that WayForPay waits for, not the usual envelope of Frappe."""
+	frappe.local.message_log = []  # the messages of the booking (Payment Entry created...) are not for the gateway
 	frappe.local.response.update(signature.answer(settings.secret_key(), reference, int(time.time())))
 
 
