@@ -3,7 +3,6 @@ from frappe import _
 from frappe.integrations.utils import create_request_log
 from frappe.model.document import Document
 from frappe.utils import call_hook_method, get_url
-from payments.utils import create_payment_gateway
 
 SERVICE = "WayForPay"
 
@@ -12,6 +11,11 @@ class WayForPaySettings(Document):
 	supported_currencies = ("UAH", "USD", "EUR")
 
 	def on_update(self):
+		# a site without the payments app (the Press site) pays through the functions of its own code
+		if "payments" not in frappe.get_installed_apps():
+			return
+		from payments.utils import create_payment_gateway
+
 		name = f"{SERVICE}-{self.gateway_name}"
 		create_payment_gateway(name, settings="WayForPay Settings", controller=self.gateway_name)
 		call_hook_method("payment_gateway_enabled", gateway=name)

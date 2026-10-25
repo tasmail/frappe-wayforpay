@@ -63,7 +63,7 @@ class TestWayForPay(FrappeTestCase):
 		)
 		self.order = url.split("order=")[1]
 
-	def say(self, _order):
+	def say(self, _order, _reference=""):
 		frappe.msgprint("Payment Entry created")  # what the booking of a payment says to the visitor
 		return "/orders/1"
 
@@ -157,3 +157,22 @@ class TestPages(FrappeTestCase):
 		for name in ("wayforpay_checkout", "wayforpay_result"):
 			module = importlib.import_module(f"wayforpay.www.{name}")
 			self.assertTrue(callable(module.get_context))
+
+
+class TestOnPaid(FrappeTestCase):
+	def test_a_function_named_in_the_order_is_called_with_the_order_and_the_reference(self):
+		calls = []
+
+		def handler(order, reference):
+			calls.append((order["team"], reference))
+			return "/dashboard/billing"
+
+		with mock.patch("frappe.get_attr", return_value=handler):
+			result = api._pay({"on_paid": "any.dotted.path", "team": "t1"}, "ref1")
+
+		self.assertEqual(result, "/dashboard/billing")
+		self.assertEqual(calls, [("t1", "ref1")])
+		frappe.set_user("Administrator")
+
+	def test_an_order_with_nothing_to_tell_is_left_alone(self):
+		self.assertIsNone(api._pay({"amount": 1}, "ref1"))

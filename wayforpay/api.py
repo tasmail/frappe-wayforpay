@@ -59,7 +59,7 @@ def _record(request, order: dict, data: dict):
 		return
 	if status in SUCCESS:
 		request.db_set("status", "Completed", update_modified=True)
-		request.db_set("output", json.dumps({**output, "redirect_to": _pay(order)}))
+		request.db_set("output", json.dumps({**output, "redirect_to": _pay(order, request.name)}))
 	elif status in FAILURE:
 		request.db_set("status", "Failed", update_modified=True)
 		request.db_set("output", json.dumps(output))
@@ -68,15 +68,22 @@ def _record(request, order: dict, data: dict):
 	frappe.db.commit()
 
 
-def _pay(order: dict) -> str | None:
-	"""Let the document know that it is paid (a Payment Request books the payment); returns where to go next."""
+def _pay(order: dict, reference: str = "") -> str | None:
+	"""Let the shop know that the order is paid; returns where to go next.
+
+	The code that started the payment can name a function in the data of the order (`on_paid`, a dotted path;
+	the data is kept on the server, the payer cannot change it): it is called with the order and the reference
+	of the payment. Otherwise the document of the order (a Payment Request books the payment) is told.
+	"""
+	handler = order.get("on_paid")
 	doctype, name = order.get("reference_doctype"), order.get("reference_docname")
-	if not (doctype and name):
+	if not (handler or (doctype and name)):
 		return None
-	frappe.set_user(
-		"Administrator"
-	)  # the visitor of the notification is the gateway, the signature was checked
+	# the visitor of the notification is the gateway, the signature was checked
+	frappe.set_user("Administrator")
 	try:
+		if handler:
+			return frappe.get_attr(handler)(order, reference)
 		return frappe.get_doc(doctype, name).run_method("on_payment_authorized", "Completed")
 	except Exception:
 		frappe.log_error(title="WayForPay: the paid document was not updated", message=frappe.get_traceback())
