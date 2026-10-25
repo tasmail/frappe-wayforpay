@@ -1,0 +1,31 @@
+{% extends "templates/web.html" %}
+
+{% block page_content %}
+<div class="container" style="max-width:520px;margin:48px auto;text-align:center">
+	<h3>{{ _("Payment") }}</h3>
+	<p id="wayforpay-note"></p>
+</div>
+<script>
+(function () {
+	var texts = {{ texts }};
+	var note = document.getElementById("wayforpay-note");
+	var order = {{ order | tojson }};
+	var tries = 0;
+	note.textContent = texts.waiting;
+	function check() {
+		fetch("/api/method/wayforpay.api.status?order=" + encodeURIComponent(order))
+			.then(function (r) { return r.json(); })
+			.then(function (r) {
+				var result = r.message || {};
+				if (result.status === "Completed") { window.location.href = result.redirect_to || "/payment-success"; return; }
+				if (result.status === "Failed") { window.location.href = "/payment-failed"; return; }
+				tries += 1;
+				if (tries > 30) { note.textContent = texts.late; return; }
+				setTimeout(check, 2000);
+			})
+			.catch(function () { setTimeout(check, 4000); });
+	}
+	check();
+})();
+</script>
+{% endblock %}

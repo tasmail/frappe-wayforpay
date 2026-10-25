@@ -1,0 +1,144 @@
+import json
+from types import SimpleNamespace
+from unittest import mock
+
+import frappe
+from frappe.tests.utils import FrappeTestCase
+
+from wayforpay import api, checkout, signature
+
+SECRET = "flow-secret"
+GATEWAY = "Test"
+
+
+def settings():
+	if frappe.db.exists("WayForPay Settings", GATEWAY):
+		frappe.delete_doc("WayForPay Settings", GATEWAY, force=True)
+	doc = frappe.get_doc(
+		{
+			"doctype": "WayForPay Settings",
+			"gateway_name": GATEWAY,
+			"merchant_account": "test_merch",
+			"merchant_domain_name": "shop.example",
+			"merchant_secret_key": SECRET,
+		}
+	)
+	doc.flags.ignore_mandatory = True
+	return doc.insert(ignore_permissions=True)
+
+
+def notification(reference, **override):
+	data = {
+		"merchantAccount": "test_merch",
+		"orderReference": reference,
+		"amount": 4520,
+		"currency": "UAH",
+		"authCode": "1",
+		"cardPan": "41****1111",
+		"transactionStatus": "Approved",
+		"reason": "Ok",
+		"reasonCode": 1100,
+		**override,
+	}
+	text = {key: str(value) for key, value in data.items()}
+	data["merchantSignature"] = signature.notification_signature(SECRET, text)
+	return json.dumps(data)
+
+
+class TestWayForPay(FrappeTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.gateway = settings()
+		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "paid thing"}).insert().name
+		url = self.gateway.get_payment_url(
+			amount=4520,
+			currency="UAH",
+			title="Shop",
+			description="Order 1",
+			payer_email="payer@example.com",
+			payer_name="Payer",
+			reference_doctype="ToDo",
+			reference_docname=self.todo,
+			payment_gateway="WayForPay-Test",
+		)
+		self.order = url.split("order=")[1]
+
+	def send(self, body):
+		frappe.local.response = frappe._dict()
+		request = SimpleNamespace(get_data=lambda as_text=True: body)
+		with (
+			mock.patch.object(frappe, "request", request),
+			mock.patch.object(api, "_pay", return_value="/orders/1") as pay,
+		):
+			api.notify()
+		return frappe.local.response, pay
+
+	def test_saving_the_settings_makes_the_payment_gateway(self):
+		self.assertTrue(frappe.db.exists("Payment Gateway", "WayForPay-Test"))
+		self.assertEqual(
+			frappe.db.get_value("Payment Gateway", "WayForPay-Test", "gateway_controller"), GATEWAY
+		)
+
+	def test_only_the_currencies_of_wayforpay_are_taken(self):
+		self.gateway.validate_transaction_currency("UAH")
+		with self.assertRaises(frappe.ValidationError):
+			self.gateway.validate_transaction_currency("JPY")
+
+	def test_the_form_is_signed_and_the_amount_comes_from_the_server_not_from_the_address(self):
+		form = checkout.payment_form(self.order)
+		fields = dict(form["fields"])
+
+		self.assertEqual(form["action"], "https://secure.wayforpay.com/pay")
+		self.assertEqual((fields["amount"], fields["currency"]), ("4520", "UAH"))
+		self.assertEqual(fields["orderReference"], self.order)
+		self.assertEqual(fields["productPrice[]"], "4520")
+		self.assertTrue(fields["serviceUrl"].endswith("/api/method/wayforpay.api.notify"))
+		expected = signature.sign_request(
+			SECRET,
+			{**fields, "orderDate": fields["orderDate"]},
+			[{"name": "Order 1", "count": 1, "price": "4520"}],
+		)
+		self.assertEqual(fields["merchantSignature"], expected)
+
+	def test_an_unknown_order_is_refused(self):
+		with self.assertRaises(frappe.DoesNotExistError):
+			checkout.payment_form("nothing")
+
+	def test_an_approved_notification_completes_the_payment_once(self):
+		response, pay = self.send(notification(self.order))
+
+		self.assertEqual(response["status"], "accept")
+		self.assertEqual(
+			response["signature"], signature.sign(SECRET, [self.order, "accept", response["time"]])
+		)
+		pay.assert_called_once()
+		self.assertEqual(frappe.db.get_value("Integration Request", self.order, "status"), "Completed")
+		self.assertEqual(api.status(self.order), {"status": "Completed", "redirect_to": "/orders/1"})
+
+		_response, again = self.send(notification(self.order))
+		again.assert_not_called()  # a repeated notification pays nothing twice
+
+	def test_a_notification_with_a_wrong_signature_or_amount_changes_nothing(self):
+		forged = json.loads(notification(self.order))
+		forged["merchantSignature"] = "0" * 32
+		response, pay = self.send(json.dumps(forged))
+		self.assertEqual(response.get("http_status_code"), 400)
+		pay.assert_not_called()
+
+		response, pay = self.send(
+			notification(self.order, amount=1)
+		)  # genuine, but not the amount of the order
+		self.assertEqual(response.get("http_status_code"), 400)
+		pay.assert_not_called()
+		self.assertEqual(frappe.db.get_value("Integration Request", self.order, "status"), "Queued")
+
+	def test_a_declined_payment_is_failed_and_an_unknown_reference_is_refused(self):
+		self.send(notification(self.order, transactionStatus="Declined", reasonCode=1101))
+		self.assertEqual(api.status(self.order), {"status": "Failed"})
+
+		response, _pay = self.send(notification("nope"))
+		self.assertEqual(response.get("http_status_code"), 400)
+
+	def test_a_payment_in_process_is_pending(self):
+		self.send(notification(self.order, transactionStatus="InProcessing"))
+		self.assertEqual(api.status(self.order), {"status": "Pending"})

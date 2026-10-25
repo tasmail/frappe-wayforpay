@@ -1,0 +1,96 @@
+{
+ "actions": [],
+ "autoname": "field:gateway_name",
+ "creation": "2026-10-26 00:00:00",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "gateway_name",
+  "merchant_account",
+  "merchant_domain_name",
+  "merchant_secret_key",
+  "options_section",
+  "language",
+  "order_timeout",
+  "service_url_note"
+ ],
+ "fields": [
+  {
+   "fieldname": "gateway_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Payment Gateway Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "merchant_account",
+   "fieldtype": "Data",
+   "label": "Merchant account",
+   "reqd": 1,
+   "description": "merchantAccount of the personal account of WayForPay"
+  },
+  {
+   "fieldname": "merchant_domain_name",
+   "fieldtype": "Data",
+   "label": "Merchant domain",
+   "reqd": 1,
+   "description": "The domain of the site as it is registered in WayForPay, without https://"
+  },
+  {
+   "fieldname": "merchant_secret_key",
+   "fieldtype": "Password",
+   "label": "Merchant secret key",
+   "reqd": 1
+  },
+  {
+   "fieldname": "options_section",
+   "fieldtype": "Section Break",
+   "label": "Options"
+  },
+  {
+   "default": "Auto",
+   "fieldname": "language",
+   "fieldtype": "Select",
+   "label": "Language of the payment page",
+   "options": "Auto\nUA\nRU\nEN",
+   "description": "Auto takes the language of the visitor"
+  },
+  {
+   "default": "86400",
+   "fieldname": "order_timeout",
+   "fieldtype": "Int",
+   "label": "Time to pay (seconds)"
+  },
+  {
+   "fieldname": "service_url_note",
+   "fieldtype": "Small Text",
+   "label": "Address for the notifications",
+   "read_only": 1,
+   "description": "WayForPay sends the result of a payment here (the site sets it in every request)"
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-26 00:00:00",
+ "modified_by": "Administrator",
+ "module": "WayForPay",
+ "name": "WayForPay Settings",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

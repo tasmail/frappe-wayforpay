@@ -1,0 +1,19 @@
+{% extends "templates/web.html" %}
+
+{% block page_content %}
+<div class="container" style="max-width:520px;margin:48px auto;text-align:center">
+	{% if form %}
+	<p>{{ _("Taking you to the payment page of WayForPay…") }}</p>
+	<form id="wayforpay-form" method="post" action="{{ form.action }}" accept-charset="utf-8">
+		{% for name, value in form.fields %}
+		<input type="hidden" name="{{ name }}" value="{{ value }}">
+		{% endfor %}
+		<noscript><button type="submit" class="btn btn-primary">{{ _("Pay") }}</button></noscript>
+	</form>
+	<script>document.getElementById("wayforpay-form").submit();</script>
+	{% else %}
+	<h3>{{ _("Payment") }}</h3>
+	<p>{{ error }}</p>
+	{% endif %}
+</div>
+{% endblock %}
