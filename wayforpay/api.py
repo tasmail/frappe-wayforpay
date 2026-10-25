@@ -32,24 +32,30 @@ def notify():
 	except Exception:
 		frappe.local.response.http_status_code = 400
 		return
-	if data.get("merchantAccount") != settings.merchant_account or not signature.notification_is_genuine(
-		settings.secret_key(), data
-	):
-		frappe.log_error(title="WayForPay: the signature of a notification does not match", message=reference)
+	if not is_trustworthy(settings, order, data, reference):
 		frappe.local.response.http_status_code = 400
 		return
-	if not checkout.amount_matches(order, data):
-		frappe.log_error(
-			title="WayForPay: the amount of a notification differs from the order",
-			message=f"{reference}: {data.get('amount')} {data.get('currency')} instead of {order.get('amount')} {order.get('currency')}",
-		)
-		frappe.local.response.http_status_code = 400
-		return
-	_record(request, order, data)
+	record(request, order, data)
 	_answer(settings, reference)
 
 
-def _record(request, order: dict, data: dict):
+def is_trustworthy(settings, order: dict, data: dict, reference: str) -> bool:
+	"""The result of a payment is believed when it is signed with the key of the merchant and is for this order."""
+	if data.get("merchantAccount") != settings.merchant_account or not signature.notification_is_genuine(
+		settings.secret_key(), data
+	):
+		frappe.log_error(title="WayForPay: the signature of a result does not match", message=reference)
+		return False
+	if not checkout.amount_matches(order, data):
+		frappe.log_error(
+			title="WayForPay: the amount of a result differs from the order",
+			message=f"{reference}: {data.get('amount')} {data.get('currency')} instead of {order.get('amount')}",
+		)
+		return False
+	return True
+
+
+def record(request, order: dict, data: dict):
 	"""Keep the notification and, once, pay the document that the payment is for."""
 	status = data.get("transactionStatus")
 	output = {
