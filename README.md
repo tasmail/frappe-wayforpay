@@ -12,6 +12,10 @@ Webshop) can be paid through it like through Stripe.
   notification pays nothing twice. The payer returns to `/wayforpay_result`, which waits for the notification and goes
   to the success or the failure page.
 - Currencies: UAH, USD, EUR.
+- Without the `payments` app (a site that is not a shop) the gateway still works: the code that starts a payment
+  names a function in the data of the order (`on_paid`, a dotted path), and the notification calls it with the order
+  and the reference of the payment. `wayforpay.rates.rate("USD")` is the official rate of the National Bank of
+  Ukraine (cached for an hour) for a payment that is priced in another currency.
 
 Test merchant of WayForPay (public, from their documentation): account `test_merch_n1`, domain `www.market.ua`.
 
