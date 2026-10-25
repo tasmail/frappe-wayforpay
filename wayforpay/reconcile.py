@@ -9,6 +9,7 @@ from datetime import timedelta
 
 import frappe
 import requests
+from frappe.utils import flt
 
 from wayforpay import api, checkout, signature
 
@@ -39,22 +40,33 @@ def reconcile_payment(name: str) -> str | None:
 	data = check_status(settings, name)
 	if not data or not api.is_trustworthy(settings, order, data, name):
 		return None
+	if returned_in_full(order, data):
+		# the answer for a returned payment still says Approved: the refund is told by refundAmount
+		data = {**data, "transactionStatus": "Refunded"}
 	api.record(request, order, data)
 	return data["transactionStatus"]
+
+
+def returned_in_full(order: dict, data: dict) -> bool:
+	return data.get("transactionStatus") == "Approved" and flt(data.get("refundAmount")) >= flt(
+		order.get("amount")
+	)
 
 
 def reconcile() -> dict:
 	"""The job of the scheduler: every payment that waits for its notification is asked about."""
 	now = frappe.utils.now_datetime()
+	# a payment that waits for its notification, and a payment that was booked and may have been returned since
 	rows = frappe.get_all(
 		"Integration Request",
 		filters={
 			"integration_request_service": "WayForPay",
-			"status": "Queued",
+			"status": ["in", ["Queued", "Completed"]],
 			"creation": ["between", [now - timedelta(days=KEEP_DAYS), now - timedelta(minutes=WAIT_MINUTES)]],
 		},
-		pluck="name",
+		fields=["name", "output"],
 	)
+	rows = [row.name for row in rows if not (json.loads(row.output or "null") or {}).get("refunded")]
 	found = {}
 	for name in rows:
 		try:

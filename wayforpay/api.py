@@ -61,7 +61,9 @@ def record(request, order: dict, data: dict):
 	output = {
 		key: data.get(key) for key in ("transactionStatus", "reason", "reasonCode", "paymentSystem", "email")
 	}
-	if request.status == "Completed":  # a repeated notification: nothing to do twice
+	if request.status == "Completed":  # a repeated notification: nothing to pay twice
+		if status == "Refunded":
+			_refund(request, order, data)
 		return
 	if status in SUCCESS:
 		request.db_set("status", "Completed", update_modified=True)
@@ -71,6 +73,34 @@ def record(request, order: dict, data: dict):
 		request.db_set("output", json.dumps(output))
 	else:  # in process: the next notification tells the end
 		request.db_set("output", json.dumps(output))
+	frappe.db.commit()
+
+
+def _sibling(path: str | None, name: str) -> str | None:
+	"""The function `name` that lives next to the function `path`, when there is one (orders made before refunds)."""
+	if not path or "." not in path:
+		return None
+	module, _function = path.rsplit(".", 1)
+	try:
+		return f"{module}.{name}" if hasattr(frappe.get_module(module), name) else None
+	except ImportError:
+		return None
+
+
+def _refund(request, order: dict, data: dict):
+	"""Tell the shop, once, that a payment that it booked was returned to the payer."""
+	output = json.loads(request.output or "null") or {}
+	if output.get("refunded"):
+		return
+	handler = order.get("on_refunded") or _sibling(order.get("on_paid"), "on_refunded")
+	if handler:
+		frappe.set_user("Administrator")
+		try:
+			frappe.get_attr(handler)(order, request.name, data)
+		except Exception:
+			frappe.log_error(title="WayForPay: a refund was not booked", message=frappe.get_traceback())
+			return
+	request.db_set("output", json.dumps({**output, "refunded": True}))
 	frappe.db.commit()
 
 
