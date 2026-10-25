@@ -4,3 +4,6 @@ app_publisher = "FOSS-On-Line"
 app_description = "WayForPay payment gateway for Frappe Payments"
 app_email = "foss@foss.ua"
 app_license = "gpl-3.0"
+
+# A payment whose notification was lost is asked about at WayForPay (reconcile.py).
+scheduler_events = {"hourly": ["wayforpay.reconcile.reconcile"]}

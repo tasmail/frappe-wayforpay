@@ -215,3 +215,69 @@ class TestPayerEmail(FrappeTestCase):
 			names.append(dict(checkout.payment_form(url.split("order=")[1])["fields"]).get("clientEmail"))
 
 		self.assertEqual(names, [None, "payer@example.com"])
+
+
+class TestReconcile(FrappeTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.gateway = settings()
+		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "x"}).insert().name
+		url = self.gateway.get_payment_url(
+			amount=4520,
+			currency="UAH",
+			description="Order",
+			reference_doctype="ToDo",
+			reference_docname=self.todo,
+		)
+		self.order = url.split("order=")[1]
+
+	def answer(self, **override):
+		return json.loads(notification(self.order, **override))
+
+	def run_reconcile(self, data):
+		from wayforpay import reconcile
+
+		with (
+			mock.patch.object(reconcile, "check_status", return_value=data),
+			mock.patch.object(api, "_pay", return_value="/orders/1") as pay,
+		):
+			return reconcile.reconcile_payment(self.order), pay
+
+	def test_a_payment_that_lost_its_notification_is_paid_from_the_answer_of_the_check(self):
+		status, pay = self.run_reconcile(signature.parse_notification(notification(self.order)))
+
+		self.assertEqual(status, "Approved")
+		pay.assert_called_once()
+		self.assertEqual(frappe.db.get_value("Integration Request", self.order, "status"), "Completed")
+
+	def test_an_answer_with_a_wrong_signature_or_amount_pays_nothing(self):
+		forged = signature.parse_notification(notification(self.order))
+		forged["merchantSignature"] = "0" * 32
+		status, pay = self.run_reconcile(forged)
+		self.assertIsNone(status)
+		pay.assert_not_called()
+
+		status, pay = self.run_reconcile(signature.parse_notification(notification(self.order, amount=1)))
+		self.assertIsNone(status)
+		pay.assert_not_called()
+		self.assertEqual(frappe.db.get_value("Integration Request", self.order, "status"), "Queued")
+
+	def test_a_payment_that_wayforpay_does_not_know_is_left_alone(self):
+		status, pay = self.run_reconcile(None)
+
+		self.assertIsNone(status)
+		pay.assert_not_called()
+
+	def test_only_payments_that_waited_long_enough_are_asked_about(self):
+		from wayforpay import reconcile
+
+		with mock.patch.object(reconcile, "reconcile_payment", return_value="Approved") as asked:
+			self.assertNotIn(self.order, reconcile.reconcile())  # the payment of this test is a minute old
+		self.assertNotIn(mock.call(self.order), asked.call_args_list)
+
+		frappe.db.set_value(
+			"Integration Request", self.order, "creation", frappe.utils.add_to_date(None, minutes=-30)
+		)
+		with mock.patch.object(reconcile, "reconcile_payment", return_value="Approved") as asked:
+			self.assertEqual(reconcile.reconcile()[self.order], "Approved")
+		self.assertIn(mock.call(self.order), asked.call_args_list)
