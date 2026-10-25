@@ -39,3 +39,14 @@ class WayForPaySettings(Document):
 		"""
 		request = create_request_log({**kwargs, "wayforpay_settings": self.name}, service_name=SERVICE)
 		return get_url(f"/wayforpay_checkout?order={request.name}")
+
+	def get_card_url(self, **kwargs):
+		"""The address of the page that sends the payer to WayForPay to verify a card and save its token.
+
+		The card is entered on the page of WayForPay: nothing is charged and no card data reaches this site.
+		"""
+		request = create_request_log(
+			{**kwargs, "kind": "verify", "amount": 0, "currency": "UAH", "wayforpay_settings": self.name},
+			service_name=SERVICE,
+		)
+		return get_url(f"/wayforpay_checkout?order={request.name}")

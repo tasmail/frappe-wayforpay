@@ -1,0 +1,41 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-26 00:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "gateway",
+  "owner_doctype",
+  "owner_name",
+  "status",
+  "card_section",
+  "card_pan",
+  "card_type",
+  "issuer_bank",
+  "rec_token"
+ ],
+ "fields": [
+  {"fieldname": "gateway", "fieldtype": "Link", "label": "Gateway", "options": "WayForPay Settings", "reqd": 1, "in_list_view": 1},
+  {"fieldname": "owner_doctype", "fieldtype": "Data", "label": "Owner document type", "reqd": 1, "in_list_view": 1},
+  {"fieldname": "owner_name", "fieldtype": "Data", "label": "Owner", "reqd": 1, "in_list_view": 1, "search_index": 1},
+  {"default": "Active", "fieldname": "status", "fieldtype": "Select", "label": "Status", "options": "Active\nRemoved", "in_list_view": 1},
+  {"fieldname": "card_section", "fieldtype": "Section Break", "label": "Card"},
+  {"fieldname": "card_pan", "fieldtype": "Data", "label": "Card number (masked)", "read_only": 1},
+  {"fieldname": "card_type", "fieldtype": "Data", "label": "Card type", "read_only": 1},
+  {"fieldname": "issuer_bank", "fieldtype": "Data", "label": "Issuer bank", "read_only": 1},
+  {"fieldname": "rec_token", "fieldtype": "Password", "label": "Token of the card", "description": "The token that WayForPay gives for charges without the payer; it is stored encrypted"}
+ ],
+ "links": [],
+ "modified": "2026-10-26 00:00:00",
+ "modified_by": "Administrator",
+ "module": "WayForPay",
+ "name": "WayForPay Card",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

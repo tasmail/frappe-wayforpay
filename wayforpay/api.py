@@ -61,6 +61,8 @@ def record(request, order: dict, data: dict):
 	output = {
 		key: data.get(key) for key in ("transactionStatus", "reason", "reasonCode", "paymentSystem", "email")
 	}
+	if order.get("kind") == "verify":
+		return _record_card(request, order, data, output)
 	if request.status == "Completed":  # a repeated notification: nothing to pay twice
 		if status == "Refunded":
 			_refund(request, order, data)
@@ -85,6 +87,37 @@ def _sibling(path: str | None, name: str) -> str | None:
 		return f"{module}.{name}" if hasattr(frappe.get_module(module), name) else None
 	except ImportError:
 		return None
+
+
+def _record_card(request, order: dict, data: dict, output: dict):
+	"""The result of a card verification: a verified card is saved (its token never goes into the log)."""
+	if request.status == "Completed":
+		return
+	if data.get("transactionStatus") in SUCCESS and data.get("recToken"):
+		from wayforpay import cards
+
+		card = cards.save_card(order, data)
+		redirect = None
+		handler = order.get("on_card")
+		if handler:
+			frappe.set_user("Administrator")
+			try:
+				redirect = frappe.get_attr(handler)(order, card)
+			except Exception:
+				frappe.log_error(
+					title="WayForPay: a saved card was not told to the shop", message=frappe.get_traceback()
+				)
+		request.db_set("status", "Completed", update_modified=True)
+		request.db_set(
+			"output",
+			json.dumps({**output, "cardPan": data.get("cardPan"), "card": card, "redirect_to": redirect}),
+		)
+	elif data.get("transactionStatus") in FAILURE:
+		request.db_set("status", "Failed", update_modified=True)
+		request.db_set("output", json.dumps(output))
+	else:
+		request.db_set("output", json.dumps(output))
+	frappe.db.commit()
 
 
 def _refund(request, order: dict, data: dict):
