@@ -6,6 +6,8 @@ import json
 from decimal import Decimal
 
 PAY_URL = "https://secure.wayforpay.com/pay"
+VERIFY_URL = "https://secure.wayforpay.com/verify"
+API_URL = "https://api.wayforpay.com/api"
 # the order of the values of the signature of a payment request, and of a notification of the result
 REQUEST_FIELDS = (
 	"merchantAccount",
@@ -78,3 +80,14 @@ def answer(secret: str, order_reference: str, time: int, status: str = "accept")
 		"time": time,
 		"signature": sign(secret, [order_reference, status, time]),
 	}
+
+
+def sign_verify(secret: str, fields: dict) -> str:
+	"""The signature of a card verification: the order with a zero amount, without products."""
+	return sign(
+		secret,
+		[
+			fields[name]
+			for name in ("merchantAccount", "merchantDomainName", "orderReference", "amount", "currency")
+		],
+	)

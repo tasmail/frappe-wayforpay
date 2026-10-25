@@ -43,6 +43,8 @@ def payment_form(name: str) -> dict:
 	request, data, settings = load_request(name)
 	if request.status == "Completed":
 		frappe.throw(_("This payment has been made already"))
+	if data.get("kind") == "verify":
+		return verify_form(request, data, settings)
 	products = products_of(data)
 	fields = {
 		"merchantAccount": settings.merchant_account,
@@ -77,6 +79,35 @@ def payment_form(name: str) -> dict:
 		rows += [(f"product{key.capitalize()}[]", product[key]) for product in products]
 	rows.append(("merchantSignature", signature.sign_request(secret, fields, products)))
 	return {"action": signature.PAY_URL, "fields": rows}
+
+
+def verify_form(request, data: dict, settings) -> dict:
+	"""The form that verifies a card for free (amount 0) and gives its token (recToken) in the result."""
+	fields = {
+		"merchantAccount": settings.merchant_account,
+		"merchantDomainName": settings.merchant_domain_name,
+		"orderReference": request.name,
+		"amount": "0",
+		"currency": "UAH",
+	}
+	rows = [
+		("merchantAccount", fields["merchantAccount"]),
+		("merchantAuthType", "SimpleSignature"),
+		("merchantDomainName", fields["merchantDomainName"]),
+		("apiVersion", 1),
+		("orderReference", fields["orderReference"]),
+		("amount", fields["amount"]),
+		("currency", fields["currency"]),
+		("paymentSystem", "card"),
+		("verifyType", "simple"),
+		("language", page_language(settings)),
+		("serviceUrl", get_url(f"/api/method/{NOTIFY_METHOD}")),
+		("returnUrl", get_url(f"/api/method/{RETURN_METHOD}")),
+	]
+	if validate_email_address(data.get("payer_email") or ""):
+		rows.append(("clientEmail", data["payer_email"]))
+	rows.append(("merchantSignature", signature.sign_verify(settings.secret_key(), fields)))
+	return {"action": signature.VERIFY_URL, "fields": rows}
 
 
 def result_url(name: str) -> str:
