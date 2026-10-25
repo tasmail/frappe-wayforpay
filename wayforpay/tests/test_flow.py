@@ -142,3 +142,13 @@ class TestWayForPay(FrappeTestCase):
 	def test_a_payment_in_process_is_pending(self):
 		self.send(notification(self.order, transactionStatus="InProcessing"))
 		self.assertEqual(api.status(self.order), {"status": "Pending"})
+
+
+class TestPages(FrappeTestCase):
+	def test_the_pages_have_python_controllers_that_frappe_can_find(self):
+		"""A page whose file name has a dash gets no context (the names of the pages are python modules)."""
+		import importlib
+
+		for name in ("wayforpay_checkout", "wayforpay_result"):
+			module = importlib.import_module(f"wayforpay.www.{name}")
+			self.assertTrue(callable(module.get_context))

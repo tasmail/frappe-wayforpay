@@ -34,4 +34,4 @@ class WayForPaySettings(Document):
 		carries only its name, so nobody can change what is paid by editing the address.
 		"""
 		request = create_request_log({**kwargs, "wayforpay_settings": self.name}, service_name=SERVICE)
-		return get_url(f"/wayforpay-checkout?order={request.name}")
+		return get_url(f"/wayforpay_checkout?order={request.name}")

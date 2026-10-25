@@ -78,7 +78,7 @@ def payment_form(name: str) -> dict:
 
 
 def result_url(name: str) -> str:
-	return get_url(f"/wayforpay-result?order={quote(name)}")
+	return get_url(f"/wayforpay_result?order={quote(name)}")
 
 
 def amount_matches(data: dict, notification: dict) -> bool:
