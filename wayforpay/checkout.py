@@ -6,7 +6,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, get_url
+from frappe.utils import cint, flt, get_url, validate_email_address
 
 from wayforpay import signature
 
@@ -67,7 +67,9 @@ def payment_form(name: str) -> dict:
 		("serviceUrl", get_url(f"/api/method/{NOTIFY_METHOD}")),
 		("returnUrl", get_url(f"/api/method/{RETURN_METHOD}")),
 	]
-	if data.get("payer_email"):
+	if validate_email_address(
+		data.get("payer_email") or ""
+	):  # a payer with no address (a service user) sends none
 		rows.append(("clientEmail", data["payer_email"]))
 	if data.get("payer_name"):
 		rows.append(("clientFirstName", str(data["payer_name"])[:60]))

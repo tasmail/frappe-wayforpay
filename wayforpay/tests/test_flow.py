@@ -195,3 +195,23 @@ class TestFailedRedirect(FrappeTestCase):
 		frappe.db.set_value("Integration Request", order, "status", "Failed")
 
 		self.assertEqual(api.status(order), {"status": "Failed", "redirect_to": "/dashboard/billing"})
+
+
+class TestPayerEmail(FrappeTestCase):
+	def test_a_payer_without_a_valid_address_sends_no_email_to_wayforpay(self):
+		frappe.set_user("Administrator")
+		gateway = settings()
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "x"}).insert().name
+		names = []
+		for payer in ("Administrator", "payer@example.com"):
+			url = gateway.get_payment_url(
+				amount=10,
+				currency="UAH",
+				description="Order",
+				payer_email=payer,
+				reference_doctype="ToDo",
+				reference_docname=todo,
+			)
+			names.append(dict(checkout.payment_form(url.split("order=")[1])["fields"]).get("clientEmail"))
+
+		self.assertEqual(names, [None, "payer@example.com"])
