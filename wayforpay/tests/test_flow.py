@@ -281,3 +281,52 @@ class TestReconcile(FrappeTestCase):
 		with mock.patch.object(reconcile, "reconcile_payment", return_value="Approved") as asked:
 			self.assertEqual(reconcile.reconcile()[self.order], "Approved")
 		self.assertIn(mock.call(self.order), asked.call_args_list)
+
+
+class TestRefund(FrappeTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.gateway = settings()
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "x"}).insert().name
+		url = self.gateway.get_payment_url(
+			amount=4520,
+			currency="UAH",
+			description="Order",
+			reference_doctype="ToDo",
+			reference_docname=todo,
+			on_refunded="any.dotted.refund",
+		)
+		self.order = url.split("order=")[1]
+
+	def run_reconcile(self, **extra):
+		from wayforpay import reconcile
+
+		data = signature.parse_notification(notification(self.order))
+		with (
+			mock.patch.object(reconcile, "check_status", return_value={**data, **extra}),
+			mock.patch.object(api, "_pay", return_value="/orders/1") as pay,
+		):
+			return reconcile.reconcile_payment(self.order), pay
+
+	def test_a_payment_that_was_returned_is_not_booked_by_the_check_of_its_state(self):
+		status, pay = self.run_reconcile(refundAmount="4520")
+
+		self.assertEqual(status, "Refunded")
+		pay.assert_not_called()
+		self.assertEqual(frappe.db.get_value("Integration Request", self.order, "status"), "Queued")
+
+	def test_a_booked_payment_that_is_returned_later_is_told_to_the_shop_once(self):
+		self.run_reconcile()  # booked
+		calls = []
+
+		def handler(*args):
+			calls.append(args)
+
+		with mock.patch("frappe.get_attr", return_value=handler):
+			self.run_reconcile(refundAmount="4520")
+			self.run_reconcile(refundAmount="4520")
+
+		# the hooks of Frappe also call get_attr: only the call of the refund has the order as its second argument
+		refunds = [call for call in calls if len(call) == 3 and call[1] == self.order]
+		self.assertEqual(len(refunds), 1)  # the second answer changes nothing
+		frappe.set_user("Administrator")
