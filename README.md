@@ -25,3 +25,19 @@ Test merchant of WayForPay (public, from their documentation): account `test_mer
 
 Developed in the Docker dev bench of `tasmail/erpnext-infra`; the unit tests need a Frappe site
 (`bench --site dev.localhost run-tests --app wayforpay`), CI checks the style (`ruff`).
+
+## A payment for a cancelled Payment Request
+
+A shop can cancel the open Payment Request of an order when the customer asks to pay again, while the customer still
+pays on the first page of WayForPay. The notification of that payment names the cancelled request, which Frappe
+refuses to update. The app does not lose the money and does not cancel or create anything:
+
+- the payment is booked (`on_payment_authorized`) on the live Payment Request of the same document: docstatus 1, status
+  `Requested` or `Pending`, the same currency and a `grand_total` equal to the paid amount (tolerance 0.005); the
+  newest one wins. The Integration Request is linked to the request that was booked (`reference_docname`);
+- when no request fits, the Integration Request stays `Completed` (the money is received) and its output carries
+  `unbooked`; an Error Log "WayForPay: payment received for a cancelled request, book manually" and a comment on the
+  document of the request tell a manager to book the payment by hand. The hourly reconcile skips such a payment.
+
+The choice is `wayforpay.api.pick_live`; its tests are pure Python (`wayforpay/tests/test_cancelled.py`), the booking
+is tested in `test_flow.py` (needs a site).

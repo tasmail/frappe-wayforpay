@@ -53,6 +53,10 @@ def returned_in_full(order: dict, data: dict) -> bool:
 	)
 
 
+def _settled(output: dict) -> bool:
+	return bool(output.get("refunded") or output.get("unbooked"))
+
+
 def reconcile() -> dict:
 	"""The job of the scheduler: every payment that waits for its notification is asked about."""
 	now = frappe.utils.now_datetime()
@@ -66,7 +70,8 @@ def reconcile() -> dict:
 		},
 		fields=["name", "output"],
 	)
-	rows = [row.name for row in rows if not (json.loads(row.output or "null") or {}).get("refunded")]
+	# a payment that no live request could take waits for a manager: asking again changes nothing
+	rows = [row.name for row in rows if not _settled(json.loads(row.output or "null") or {})]
 	found = {}
 	for name in rows:
 		try:

@@ -330,3 +330,76 @@ class TestRefund(FrappeTestCase):
 		refunds = [call for call in calls if len(call) == 3 and call[1] == self.order]
 		self.assertEqual(len(refunds), 1)  # the second answer changes nothing
 		frappe.set_user("Administrator")
+
+
+class TestCancelledRequest(FrappeTestCase):
+	"""Needs a site: a payment made on the page of a request that the shop cancelled meanwhile is not lost."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.gateway = settings()
+		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "x"}).insert().name
+		self.paid = []
+
+	def order_for(self, cancelled):
+		url = self.gateway.get_payment_url(
+			amount=4520,
+			currency="UAH",
+			description="Order",
+			reference_doctype="Payment Request",
+			reference_docname=cancelled.name,
+		)
+		return url.split("order=")[1]
+
+	def fake_request(self, status, docstatus):
+		doc = mock.Mock(
+			docstatus=docstatus,
+			status=status,
+			reference_doctype="ToDo",
+			reference_name=self.todo,
+			currency="UAH",
+		)
+		doc.name = f"PRQ-{status}-{docstatus}"
+		doc.run_method.side_effect = lambda *args: self.paid.append(doc.name) or "/orders/1"
+		return doc
+
+	def patched_get_doc(self, *documents):
+		"""frappe.get_doc that returns the given fake documents by name and the real ones for everything else."""
+		real = frappe.get_doc
+		by_name = {doc.name: doc for doc in documents}
+
+		def get_doc(doctype, name=None):
+			return by_name[name] if name in by_name else real(doctype, name)
+
+		return mock.patch.object(frappe, "get_doc", side_effect=get_doc)
+
+	def test_the_payment_is_booked_on_the_live_request_and_linked_to_it(self):
+		cancelled, live = self.fake_request("Cancelled", 2), self.fake_request("Requested", 1)
+		order = self.order_for(cancelled)
+		data = {"reference_doctype": "Payment Request", "reference_docname": cancelled.name, "amount": 4520}
+
+		with (
+			self.patched_get_doc(cancelled, live),
+			mock.patch.object(frappe, "get_all", return_value=[{"name": live.name, "grand_total": 4520}]),
+		):
+			self.assertEqual(api._pay(data, order), "/orders/1")
+
+		self.assertEqual(self.paid, [live.name])
+		self.assertEqual(frappe.db.get_value("Integration Request", order, "reference_docname"), live.name)
+
+	def test_without_a_live_request_nothing_is_booked_and_the_integration_request_says_so(self):
+		cancelled = self.fake_request("Cancelled", 2)
+		order = self.order_for(cancelled)
+		body = notification(order)
+
+		with (
+			self.patched_get_doc(cancelled),
+			mock.patch.object(frappe, "get_all", return_value=[]),
+			mock.patch.object(frappe, "request", SimpleNamespace(get_data=lambda as_text=True: body)),
+		):
+			frappe.local.response = frappe._dict()
+			api.notify()
+
+		self.assertEqual(self.paid, [])
+		self.assertEqual(frappe.db.get_value("Integration Request", order, "status"), "Completed")
+		self.assertIn("unbooked", frappe.db.get_value("Integration Request", order, "output"))

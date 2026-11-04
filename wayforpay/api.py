@@ -5,12 +5,14 @@ import re
 import time
 
 import frappe
-from frappe.utils import get_url
+from frappe.utils import flt, get_url
 
 from wayforpay import checkout, signature
 
 SUCCESS = ("Approved",)
 FAILURE = ("Declined", "Expired")
+LIVE_STATUSES = ["Requested", "Pending"]  # the open states of a Payment Request that can still be paid
+AMOUNT_TOLERANCE = 0.005
 REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -69,7 +71,13 @@ def record(request, order: dict, data: dict):
 		return
 	if status in SUCCESS:
 		request.db_set("status", "Completed", update_modified=True)
-		request.db_set("output", json.dumps({**output, "redirect_to": _pay(order, request.name)}))
+		redirect = _pay(order, request.name)
+		# a payment that no live request could take stays visible in the Integration Request
+		unbooked = frappe.flags.pop("wayforpay_unbooked", None)
+		request.db_set(
+			"output",
+			json.dumps({**output, "redirect_to": redirect, **({"unbooked": unbooked} if unbooked else {})}),
+		)
 	elif status in FAILURE:
 		request.db_set("status", "Failed", update_modified=True)
 		request.db_set("output", json.dumps(output))
@@ -153,10 +161,77 @@ def _pay(order: dict, reference: str = "") -> str | None:
 	try:
 		if handler:
 			return frappe.get_attr(handler)(order, reference)
-		return frappe.get_doc(doctype, name).run_method("on_payment_authorized", "Completed")
+		document = frappe.get_doc(doctype, name)
+		if doctype == "Payment Request" and document.docstatus == 2:
+			document = _live_request(document, order, reference)
+			if not document:
+				return None
+		return document.run_method("on_payment_authorized", "Completed")
 	except Exception:
 		frappe.log_error(title="WayForPay: the paid document was not updated", message=frappe.get_traceback())
 		return None
+
+
+def pick_live(candidates: list[dict], amount: float) -> str | None:
+	"""The name of the request that takes a payment of `amount`: the newest whose total equals it, or None.
+
+	`candidates` are the live requests of the document (newest first), each a dict with `name` and `grand_total`.
+	"""
+	for candidate in candidates:
+		if abs(flt(candidate.get("grand_total")) - flt(amount)) < AMOUNT_TOLERANCE:
+			return candidate["name"]
+	return None
+
+
+def _live_request(cancelled, order: dict, reference: str):
+	"""The live Payment Request that a payment made for a cancelled one is booked on; None when there is none.
+
+	The shop cancels the open request of an order when the customer asks to pay again, and the customer may still
+	pay on the first page of the gateway. The money is real, so it is booked on the live request of the same
+	document with the same currency and the paid amount. Nothing is created or cancelled here: when no request
+	fits, the failure is written where a manager sees it (Error Log, a comment on the document, the output of the
+	Integration Request) and the payment is left to be booked by hand.
+	"""
+	candidates = frappe.get_all(
+		"Payment Request",
+		filters={
+			"reference_doctype": cancelled.reference_doctype,
+			"reference_name": cancelled.reference_name,
+			"docstatus": 1,
+			"status": ["in", LIVE_STATUSES],
+			"currency": cancelled.currency,
+		},
+		fields=["name", "grand_total"],
+		order_by="creation desc",
+	)
+	name = pick_live(candidates, flt(order.get("amount")))
+	if name:
+		frappe.db.set_value(
+			"Integration Request",
+			reference,
+			{"reference_docname": name},
+			update_modified=False,
+		)
+		return frappe.get_doc("Payment Request", name)
+	message = (
+		f"Payment {reference} of {order.get('amount')} {order.get('currency')} was received for the cancelled "
+		f"request {cancelled.name}, and no live request of {cancelled.reference_doctype} "
+		f"{cancelled.reference_name} fits: book it manually."
+	)
+	frappe.flags.wayforpay_unbooked = message
+	frappe.log_error(
+		title="WayForPay: payment received for a cancelled request, book manually",
+		message=message,
+		reference_doctype=cancelled.reference_doctype,
+		reference_name=cancelled.reference_name,
+	)
+	try:
+		frappe.get_doc(cancelled.reference_doctype, cancelled.reference_name).add_comment("Comment", message)
+	except Exception:
+		frappe.log_error(
+			title="WayForPay: the comment on the document was not added", message=frappe.get_traceback()
+		)
+	return None
 
 
 def _keep_cookies_of_the_browser():
