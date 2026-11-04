@@ -18,6 +18,7 @@ LIVE_STATUSES = ["Requested", "Initiated", "Partially Paid"]
 # The keys of the output of an Integration Request that tell a manager what happened to a payment.
 AUDIT = ("unbooked", "cancelled_request")
 AMOUNT_TOLERANCE = 0.005
+SAVEPOINT = "wayforpay_booking"
 REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -227,8 +228,10 @@ def _pay_cancelled(cancelled, order: dict, reference: str) -> str | None:
 
 	The shop cancels the open request of an order when the customer asks to pay again, and the customer may still
 	pay on the first page of the gateway. The money is real, so it goes to the live request that fits (see
-	_live_request). The Integration Request is linked to that request only after the booking has succeeded, and keeps
-	the name of the cancelled one. When nothing fits, or the booking raises, the payment is marked `unbooked`.
+	_live_request). The booking runs in a savepoint: when it raises it is rolled back. It counts as made only when
+	the request left the open states or owes less afterwards (a hook may return without booking). The Integration
+	Request is then linked to that request and keeps the name of the cancelled one. When nothing fits, the booking
+	raises or it books nothing, the payment is marked `unbooked`.
 	"""
 	live = _live_request(cancelled, order, reference)
 	if not live:
@@ -244,23 +247,64 @@ def _pay_cancelled(cancelled, order: dict, reference: str) -> str | None:
 			"check the existing Payment Entries and book it manually.",
 		)
 		return None
+	before = booked_amount(live)
+	# the booking is undone as a whole when it raises: a half-made Payment Entry must not stay
+	frappe.db.savepoint(SAVEPOINT)
 	try:
 		redirect = live.run_method("on_payment_authorized", "Completed")
 	except Exception:
 		frappe.log_error(title="WayForPay: the paid document was not updated", message=frappe.get_traceback())
+		undone = _rollback()
 		_unbooked(
 			cancelled,
 			reference,
 			f"Payment {reference} was received for the cancelled request {cancelled.name} and booking it on "
-			f"{live.name} failed (see the Error Log). The booking may have been partly done: check the existing "
-			"Payment Entries of the document before booking it manually.",
+			f"{live.name} failed (see the Error Log). "
+			+ (
+				"The booking was rolled back, so nothing was booked (a letter may have been sent)."
+				if undone
+				else "The booking could not be rolled back and may be partly done: check the existing Payment Entries."
+			)
+			+ " Book it manually.",
 		)
 		return None
-	frappe.db.set_value(
-		"Integration Request", reference, "reference_docname", live.name, update_modified=False
-	)
-	_note(reference, cancelled_request=cancelled.name)
+	# on_payment_authorized can return without booking (Webshop does so for a disabled cart or a Guest): the request
+	# is booked only when it left the open states or owes less than before
+	live.reload()
+	if live.status in LIVE_STATUSES and booked_amount(live) > before - AMOUNT_TOLERANCE:
+		_rollback()
+		_unbooked(
+			cancelled,
+			reference,
+			f"Payment {reference} was received for the cancelled request {cancelled.name}, but the booking on "
+			f"{live.name} returned without a Payment Entry: book it manually.",
+		)
+		return None
+	try:
+		frappe.db.release_savepoint(SAVEPOINT)
+	except Exception:  # a commit inside the booking has released it already
+		pass
+	try:
+		frappe.db.set_value(
+			"Integration Request", reference, "reference_docname", live.name, update_modified=False
+		)
+		_note(reference, cancelled_request=cancelled.name)
+	except Exception:
+		# the payment is booked: a failure of the bookkeeping about it must not look like a payment that is not
+		frappe.log_error(
+			title="WayForPay: a booked payment was not linked to its request", message=frappe.get_traceback()
+		)
 	return redirect
+
+
+def _rollback() -> bool:
+	"""Undo what the booking wrote since the savepoint; False when that is not possible."""
+	try:
+		frappe.db.rollback(save_point=SAVEPOINT)
+		return True
+	except Exception:
+		frappe.log_error(title="WayForPay: the booking was not rolled back", message=frappe.get_traceback())
+		return False
 
 
 def _unbooked(cancelled, reference: str, message: str):

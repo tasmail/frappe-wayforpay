@@ -385,7 +385,13 @@ class TestCancelledRequest(FrappeTestCase):
 		)
 		doc.name = f"PRQ-{status}-{docstatus}"
 		doc.get.side_effect = lambda key, default=None: getattr(doc, key, default)
-		doc.run_method.side_effect = lambda *args: self.paid.append(doc.name) or "/orders/1"
+
+		def book(*args):
+			self.paid.append(doc.name)
+			doc.status, doc.outstanding_amount = "Paid", 0  # what the booking does to the request
+			return "/orders/1"
+
+		doc.run_method.side_effect = book
 		return doc
 
 	def live_rows(self, rows):
@@ -464,7 +470,45 @@ class TestCancelledRequest(FrappeTestCase):
 		)
 		self.assertIn("unbooked", _output(order))
 
-	def test_the_check_of_the_state_asks_about_a_cancelled_integration_request_and_books_it_once(self):
+	def test_a_booking_that_returns_without_a_payment_entry_is_not_linked(self):
+		cancelled, live = self.fake_request("Cancelled", 2), self.fake_request("Requested", 1)
+		live.run_method.side_effect = lambda *args: None  # a hook that books nothing leaves the request open
+		order = self.order_for(cancelled)
+		data = {"reference_doctype": "Payment Request", "reference_docname": cancelled.name, "amount": 4520}
+
+		with (
+			self.patched_get_doc(cancelled, live),
+			self.live_rows([{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}]),
+		):
+			self.assertIsNone(api._pay(data, order))
+
+		self.assertEqual(
+			frappe.db.get_value("Integration Request", order, "reference_docname"), cancelled.name
+		)
+		self.assertIn("returned without a Payment Entry", _output(order)["unbooked"])
+
+	def test_a_failure_to_link_a_booked_payment_does_not_mark_it_unbooked(self):
+		cancelled, live = self.fake_request("Cancelled", 2), self.fake_request("Requested", 1)
+		order = self.order_for(cancelled)
+		data = {"reference_doctype": "Payment Request", "reference_docname": cancelled.name, "amount": 4520}
+		real = frappe.db.set_value
+
+		def set_value(doctype, name, field, *args, **kwargs):
+			if field == "reference_docname":
+				raise frappe.ValidationError("cannot link")
+			return real(doctype, name, field, *args, **kwargs)
+
+		with (
+			self.patched_get_doc(cancelled, live),
+			self.live_rows([{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}]),
+			mock.patch.object(frappe.db, "set_value", side_effect=set_value),
+		):
+			self.assertEqual(api._pay(data, order), "/orders/1")
+
+		self.assertEqual(self.paid, [live.name])
+		self.assertNotIn("unbooked", _output(order))
+
+	def test_the_hourly_check_asks_about_a_cancelled_integration_request_and_does_not_book_it_twice(self):
 		from wayforpay import reconcile
 
 		cancelled = self.fake_request("Cancelled", 2)

@@ -42,13 +42,21 @@ refuses to update. The app does not lose the money and does not cancel or create
   that is empty): a partly paid request is matched by what is still owed.
 - the chosen request is read again right before booking; when it was paid meanwhile (an `Initiated` request can be
   paid on its own page) nothing is booked and the payment is marked `unbooked`, so the money is never booked twice.
+- the booking runs in a database savepoint. When it raises, it is rolled back to the savepoint, so no half-made Payment
+  Entry stays (a letter that was already sent cannot be taken back). When the rollback itself fails, the note says that
+  the booking may be partly done.
+- the booking counts as made only when the request, read again afterwards, left the open states or owes less than before:
+  `on_payment_authorized` of Webshop returns without booking for a disabled cart or a Guest, and that must not look like
+  a booked payment. Otherwise the payment is marked `unbooked` ("returned without a Payment Entry") and nothing is linked.
+  The payment of a request that is not cancelled goes the old way, untouched.
 - the Integration Request is linked to the booked request (`reference_docname`) only after the booking has succeeded, and
-  its output keeps the name of the cancelled one (`cancelled_request`) for the audit.
+  its output keeps the name of the cancelled one (`cancelled_request`) for the audit. A failure of this bookkeeping is
+  logged ("a booked payment was not linked to its request") and is never reported as a payment that is not booked.
 - when no request fits, or the booking raises, the Integration Request stays `Completed` (the money is received) and its
   output carries `unbooked`; an Error Log "WayForPay: payment received for a cancelled request, book manually" and a
   comment on the document of the request tell a manager to book the payment by hand. The hourly reconcile skips it.
-  A booking that raised may have been partly done, so the note asks to check the existing Payment Entries of the
-  document before booking by hand. A failure of the note itself is logged and never hides the original one.
+  After a booking that raised, the note says whether it was rolled back; check the existing Payment Entries of the
+  document before booking by hand in any case. A failure of the note itself is logged and never hides the original one.
 - a notification that was lost for such a payment is recovered too: when ERPNext cancels the open Draft or Requested
   requests of a document (`cancel_old_payment_requests`) it sets their `Queued` Integration Requests to `Cancelled`; the
   hourly reconcile asks WayForPay about these too (as about `Queued` ones, for three days) and books the answer through

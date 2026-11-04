@@ -56,7 +56,7 @@ class Doubles(TestCase):
 		self.stored = {}
 		self.live = mock.Mock()
 		self.live.name = "PRQ-3"
-		self.live.run_method.return_value = "/orders/1"
+		self.live.run_method.side_effect = self.book
 		self.live.docstatus, self.live.status, self.live.outstanding_amount = 1, "Requested", 45.67
 		self.live.get.side_effect = lambda key, default=None: getattr(self.live, key, default)
 
@@ -75,6 +75,11 @@ class Doubles(TestCase):
 		self.db, self.log, _traceback, self.get_doc = (patch.start() for patch in patches)
 		for patch in patches:
 			self.addCleanup(patch.stop)
+
+	def book(self, *args):
+		"""What on_payment_authorized does to a request that it books: the request is paid."""
+		self.live.status, self.live.outstanding_amount = "Paid", 0
+		return "/orders/1"
 
 	def set_value(self, doctype, name, field, value=None, **kw):
 		if field == "output":
@@ -137,6 +142,68 @@ class TestPayCancelled(Doubles):
 		self.assertIn("check the existing Payment Entries", self.stored["unbooked"])
 		self.assertEqual(self.stored["cancelled_request"], "PRQ-2")
 
+	def test_a_request_that_is_no_longer_submitted_or_owes_another_amount_is_not_booked(self):
+		for change in ({"docstatus": 2}, {"outstanding_amount": 10}):
+			self.stored = {}
+			self.live.docstatus, self.live.status, self.live.outstanding_amount = 1, "Requested", 45.67
+			self.live.reload.side_effect = lambda change=change: [
+				setattr(self.live, key, value) for key, value in change.items()
+			]
+
+			self.assertIsNone(self.pay([row("PRQ-3")]), change)
+
+			self.live.run_method.assert_not_called()
+			self.assertIn("nothing was booked", self.stored["unbooked"])
+		self.assertEqual(self.linked(), [])
+
+	def test_a_booking_that_returns_without_a_payment_entry_is_not_linked(self):
+		self.live.run_method.side_effect = lambda *args: "/orders/1"  # a hook that books nothing
+
+		self.assertIsNone(self.pay([row("PRQ-3")]))
+
+		self.assertEqual(self.linked(), [])
+		self.assertIn("returned without a Payment Entry", self.stored["unbooked"])
+		self.assertEqual(self.stored["cancelled_request"], "PRQ-2")
+		self.comment.assert_called_once()
+
+	def test_a_booking_that_only_lowers_the_outstanding_amount_counts_as_made(self):
+		def part(*args):
+			self.live.status, self.live.outstanding_amount = "Partially Paid", 20
+			return "/orders/1"
+
+		self.live.run_method.side_effect = part
+
+		self.assertEqual(self.pay([row("PRQ-3")]), "/orders/1")
+		self.assertEqual(self.linked(), [("Integration Request", "WFP-1", "reference_docname", "PRQ-3")])
+
+	def test_a_booking_that_raises_is_rolled_back_to_the_savepoint(self):
+		self.live.run_method.side_effect = frappe.ValidationError("cannot book")
+
+		self.assertIsNone(self.pay([row("PRQ-3")]))
+
+		self.db.savepoint.assert_called_once_with(api.SAVEPOINT)
+		self.db.rollback.assert_called_once_with(save_point=api.SAVEPOINT)
+		self.assertIn("rolled back", self.stored["unbooked"])
+		self.assertNotIn("partly done", self.stored["unbooked"])
+
+	def test_a_rollback_that_fails_says_that_the_booking_may_be_partly_done(self):
+		self.live.run_method.side_effect = frappe.ValidationError("cannot book")
+		self.db.rollback.side_effect = frappe.ValidationError("no savepoint")
+
+		self.assertIsNone(self.pay([row("PRQ-3")]))
+
+		self.assertIn("may be partly done", self.stored["unbooked"])
+
+	def test_a_failure_to_link_a_booked_payment_is_not_a_failure_to_book(self):
+		self.db.set_value.side_effect = frappe.ValidationError("db is gone")
+
+		self.assertEqual(self.pay([row("PRQ-3")]), "/orders/1")  # the payment is booked and stays so
+
+		self.db.rollback.assert_not_called()
+		self.comment.assert_not_called()  # no "book it manually" about a payment that is booked
+		self.assertNotIn("unbooked", self.stored)
+		self.assertIn("not linked", self.log.call_args.kwargs["title"])
+
 	def test_a_partly_paid_request_is_booked_for_what_is_outstanding(self):
 		self.live.status, self.live.outstanding_amount = "Partially Paid", 45.67
 
@@ -156,7 +223,6 @@ class TestPayCancelled(Doubles):
 
 		self.assertEqual(self.linked(), [])
 		self.assertIn("failed", self.stored["unbooked"])
-		self.assertIn("partly done", self.stored["unbooked"])
 		self.assertEqual(self.stored["cancelled_request"], "PRQ-2")
 		self.log.assert_called()
 		self.comment.assert_called_once()
