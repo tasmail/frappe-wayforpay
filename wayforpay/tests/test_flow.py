@@ -333,7 +333,7 @@ class TestRefund(FrappeTestCase):
 
 
 def _output(order):
-	return json.loads(frappe.db.get_value("Integration Request", order, "output") or "{}")
+	return json.loads(frappe.db.get_value("Integration Request", order, "output") or "{}") or {}
 
 
 class TestCancelledRequest(FrappeTestCase):
