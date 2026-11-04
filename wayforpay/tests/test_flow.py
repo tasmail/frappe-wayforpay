@@ -392,18 +392,25 @@ class TestCancelledRequest(FrappeTestCase):
 		"""frappe.get_all that answers the query for the live Payment Requests and leaves every other query alone."""
 		real = frappe.get_all
 
-		def get_all(doctype, *args, **kwargs):
-			return rows if doctype == "Payment Request" else real(doctype, *args, **kwargs)
+		def get_all(doctype=None, *args, **kwargs):
+			if doctype == "Payment Request":
+				return rows
+			return real(doctype, *args, **kwargs)
 
 		return mock.patch.object(frappe, "get_all", side_effect=get_all)
 
 	def patched_get_doc(self, *documents):
-		"""frappe.get_doc that returns the given fake documents by name and the real ones for everything else."""
-		real = frappe.get_doc
-		by_name = {doc.name: doc for doc in documents}
+		"""frappe.get_doc that returns a fake document for its exact (doctype, name) and the real one otherwise.
 
-		def get_doc(doctype, name=None):
-			return by_name[name] if name in by_name else real(doctype, name)
+		Frappe itself calls get_doc with other arguments (error=... in log_error, for_update=... in db_set, a dict),
+		so everything that is not a fake is passed through untouched."""
+		real = frappe.get_doc
+		fakes = {("Payment Request", doc.name): doc for doc in documents}
+
+		def get_doc(*args, **kwargs):
+			if len(args) == 2 and not kwargs and (args[0], args[1]) in fakes:
+				return fakes[(args[0], args[1])]
+			return real(*args, **kwargs)
 
 		return mock.patch.object(frappe, "get_doc", side_effect=get_doc)
 
