@@ -37,8 +37,11 @@ class TestPickLive(TestCase):
 	def test_no_request_no_choice(self):
 		self.assertIsNone(api.pick_live([], 45.67))
 
-	def test_the_open_states_are_real_states_of_erpnext(self):
-		self.assertEqual(api.LIVE_STATUSES, ["Requested", "Initiated"])
+	def test_only_the_states_that_can_still_be_paid_are_live(self):
+		for status in ("Requested", "Initiated", "Partially Paid"):
+			self.assertIn(status, api.LIVE_STATUSES)
+		for status in ("Draft", "Paid", "Cancelled", "Failed", "Payment Ordered", "Pending"):
+			self.assertNotIn(status, api.LIVE_STATUSES)
 
 
 class Doubles(TestCase):
@@ -54,6 +57,8 @@ class Doubles(TestCase):
 		self.live = mock.Mock()
 		self.live.name = "PRQ-3"
 		self.live.run_method.return_value = "/orders/1"
+		self.live.docstatus, self.live.status, self.live.outstanding_amount = 1, "Requested", 45.67
+		self.live.get.side_effect = lambda key, default=None: getattr(self.live, key, default)
 
 		def get_doc(doctype, name=None):
 			return self.live if doctype == "Payment Request" else mock.Mock(add_comment=self.comment)
@@ -87,7 +92,9 @@ class TestLiveRequest(Doubles):
 		self.assertIs(result, self.live)
 		filters = rows.call_args.kwargs["filters"]
 		self.assertEqual(filters["docstatus"], 1)
-		self.assertEqual(filters["status"], ["in", ["Requested", "Initiated"]])
+		self.assertEqual(filters["status"], ["in", api.LIVE_STATUSES])
+		self.assertEqual(filters["payment_request_type"], "Inward")
+		self.assertEqual(filters["payment_channel"], ["!=", "Phone"])
 		self.assertEqual((filters["reference_doctype"], filters["reference_name"]), ("Sales Order", "SO-1"))
 		self.assertEqual(filters["currency"], "UAH")
 		self.assertIn("outstanding_amount", rows.call_args.kwargs["fields"])
@@ -117,6 +124,31 @@ class TestPayCancelled(Doubles):
 		self.assertEqual(self.linked(), [("Integration Request", "WFP-1", "reference_docname", "PRQ-3")])
 		self.assertEqual(self.stored, {"cancelled_request": "PRQ-2"})
 
+	def test_a_request_that_was_paid_since_it_was_chosen_is_not_booked_again(self):
+		def paid_meanwhile():
+			self.live.status, self.live.outstanding_amount = "Paid", 0
+
+		self.live.reload.side_effect = paid_meanwhile
+
+		self.assertIsNone(self.pay([row("PRQ-3")]))
+
+		self.live.run_method.assert_not_called()
+		self.assertEqual(self.linked(), [])
+		self.assertIn("check the existing Payment Entries", self.stored["unbooked"])
+		self.assertEqual(self.stored["cancelled_request"], "PRQ-2")
+
+	def test_a_partly_paid_request_is_booked_for_what_is_outstanding(self):
+		self.live.status, self.live.outstanding_amount = "Partially Paid", 45.67
+
+		self.assertEqual(self.pay([row("PRQ-3", total=100, outstanding=45.67)]), "/orders/1")
+
+	def test_a_failed_note_never_hides_the_failure_it_reports(self):
+		self.db.set_value.side_effect = frappe.ValidationError("db is gone")
+
+		api._note("WFP-1", unbooked="x")  # logs, does not raise
+
+		self.log.assert_called()
+
 	def test_a_booking_that_raises_links_nothing_and_marks_the_payment(self):
 		self.live.run_method.side_effect = frappe.ValidationError("cannot book")
 
@@ -124,6 +156,7 @@ class TestPayCancelled(Doubles):
 
 		self.assertEqual(self.linked(), [])
 		self.assertIn("failed", self.stored["unbooked"])
+		self.assertIn("partly done", self.stored["unbooked"])
 		self.assertEqual(self.stored["cancelled_request"], "PRQ-2")
 		self.log.assert_called()
 		self.comment.assert_called_once()

@@ -11,9 +11,10 @@ from wayforpay import checkout, signature
 
 SUCCESS = ("Approved",)
 FAILURE = ("Declined", "Expired")
-# The open states of a submitted Payment Request that can still be paid. ERPNext sets Initiated when the request
-# has a payment url (the case of every request made for a gateway account), so it is bookable like Requested.
-LIVE_STATUSES = ["Requested", "Initiated"]
+# The states of a submitted Payment Request that can still be paid. ERPNext sets Initiated when the request has a payment
+# url (the case of every request made for a gateway account) and Partially Paid when a part of it was paid; both are
+# payable like Requested, for what is still outstanding.
+LIVE_STATUSES = ["Requested", "Initiated", "Partially Paid"]
 # The keys of the output of an Integration Request that tell a manager what happened to a payment.
 AUDIT = ("unbooked", "cancelled_request")
 AMOUNT_TOLERANCE = 0.005
@@ -178,20 +179,35 @@ def _stored_output(reference: str) -> dict:
 
 
 def _note(reference: str, **audit):
-	"""Write what happened to a payment into the output of its Integration Request (kept by `record`)."""
-	frappe.db.set_value(
-		"Integration Request",
-		reference,
-		"output",
-		json.dumps({**_stored_output(reference), **audit}),
-		update_modified=False,
-	)
+	"""Write what happened to a payment into the output of its Integration Request (kept by `record`).
+
+	A failure here is logged and never raised: it must not hide the failure that is being reported.
+	"""
+	try:
+		frappe.db.set_value(
+			"Integration Request",
+			reference,
+			"output",
+			json.dumps({**_stored_output(reference), **audit}),
+			update_modified=False,
+		)
+	except Exception:
+		frappe.log_error(
+			title="WayForPay: the note on a payment was not written", message=frappe.get_traceback()
+		)
 
 
-def booked_amount(candidate: dict) -> float:
-	"""What booking a Payment Request pays: its outstanding amount (ERPNext books that), else its total."""
+def booked_amount(candidate) -> float:
+	"""What booking a Payment Request pays: its outstanding amount (ERPNext books that), else its total.
+
+	`candidate` is a dict of a query or a Payment Request.
+	"""
 	outstanding = candidate.get("outstanding_amount")
 	return flt(outstanding if outstanding is not None else candidate.get("grand_total"))
+
+
+def _fits(live, order: dict) -> bool:
+	return abs(booked_amount(live) - flt(order.get("amount"))) < AMOUNT_TOLERANCE
 
 
 def pick_live(candidates: list[dict], amount: float) -> str | None:
@@ -217,6 +233,17 @@ def _pay_cancelled(cancelled, order: dict, reference: str) -> str | None:
 	live = _live_request(cancelled, order, reference)
 	if not live:
 		return None
+	# the request may have been paid since it was chosen (a payment on its own page): read it again right before
+	live.reload()
+	if live.docstatus != 1 or live.status not in LIVE_STATUSES or not _fits(live, order):
+		_unbooked(
+			cancelled,
+			reference,
+			f"Payment {reference} was received for the cancelled request {cancelled.name}, and the live request "
+			f"{live.name} is {live.status} with {live.get('outstanding_amount')} outstanding, so nothing was booked: "
+			"check the existing Payment Entries and book it manually.",
+		)
+		return None
 	try:
 		redirect = live.run_method("on_payment_authorized", "Completed")
 	except Exception:
@@ -225,7 +252,8 @@ def _pay_cancelled(cancelled, order: dict, reference: str) -> str | None:
 			cancelled,
 			reference,
 			f"Payment {reference} was received for the cancelled request {cancelled.name} and booking it on "
-			f"{live.name} failed (see the Error Log): book it manually.",
+			f"{live.name} failed (see the Error Log). The booking may have been partly done: check the existing "
+			"Payment Entries of the document before booking it manually.",
 		)
 		return None
 	frappe.db.set_value(
@@ -255,8 +283,9 @@ def _unbooked(cancelled, reference: str, message: str):
 def _live_request(cancelled, order: dict, reference: str):
 	"""The live Payment Request that takes a payment made for a cancelled one, or None (the failure is then written).
 
-	Live means: the same document, docstatus 1, status Requested or Initiated, the same currency, and a booked
-	amount (outstanding amount) equal to the paid amount. Nothing is created or cancelled here.
+	Live means: the same document, docstatus 1, an Inward request that is not a Phone one, status Requested,
+	Initiated or Partially Paid, the same currency, and a booked amount (outstanding amount) equal to the paid
+	amount. Nothing is created or cancelled here.
 	"""
 	candidates = frappe.get_all(
 		"Payment Request",
@@ -266,6 +295,9 @@ def _live_request(cancelled, order: dict, reference: str):
 			"docstatus": 1,
 			"status": ["in", LIVE_STATUSES],
 			"currency": cancelled.currency,
+			# an Outward request (a payment to a supplier) and a Phone one (its payment books nothing) are not it
+			"payment_request_type": "Inward",
+			"payment_channel": ["!=", "Phone"],
 		},
 		fields=["name", "grand_total", "outstanding_amount"],
 		order_by="creation desc",

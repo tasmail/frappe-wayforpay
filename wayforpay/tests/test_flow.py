@@ -346,26 +346,56 @@ class TestCancelledRequest(FrappeTestCase):
 		self.paid = []
 
 	def order_for(self, cancelled):
+		"""An Integration Request of the payment of the request `cancelled`.
+
+		The site of the tests may have no Payment Request doctype (no ERPNext), so the request is made for a real
+		ToDo (the link is validated) and then pointed at the fake request with plain database writes."""
 		url = self.gateway.get_payment_url(
 			amount=4520,
 			currency="UAH",
 			description="Order",
-			reference_doctype="Payment Request",
-			reference_docname=cancelled.name,
+			reference_doctype="ToDo",
+			reference_docname=self.todo,
 		)
-		return url.split("order=")[1]
+		order = url.split("order=")[1]
+		data = json.loads(frappe.db.get_value("Integration Request", order, "data"))
+		data.update({"reference_doctype": "Payment Request", "reference_docname": cancelled.name})
+		frappe.db.set_value(
+			"Integration Request",
+			order,
+			{
+				"reference_doctype": "Payment Request",
+				"reference_docname": cancelled.name,
+				"data": json.dumps(data),
+			},
+			update_modified=False,
+		)
+		return order
 
 	def fake_request(self, status, docstatus):
+		"""A Payment Request that is only an object: the tests need no ERPNext and no Payment Request doctype."""
 		doc = mock.Mock(
 			docstatus=docstatus,
 			status=status,
 			reference_doctype="ToDo",
 			reference_name=self.todo,
 			currency="UAH",
+			outstanding_amount=4520,
+			grand_total=4520,
 		)
 		doc.name = f"PRQ-{status}-{docstatus}"
+		doc.get.side_effect = lambda key, default=None: getattr(doc, key, default)
 		doc.run_method.side_effect = lambda *args: self.paid.append(doc.name) or "/orders/1"
 		return doc
+
+	def live_rows(self, rows):
+		"""frappe.get_all that answers the query for the live Payment Requests and leaves every other query alone."""
+		real = frappe.get_all
+
+		def get_all(doctype, *args, **kwargs):
+			return rows if doctype == "Payment Request" else real(doctype, *args, **kwargs)
+
+		return mock.patch.object(frappe, "get_all", side_effect=get_all)
 
 	def patched_get_doc(self, *documents):
 		"""frappe.get_doc that returns the given fake documents by name and the real ones for everything else."""
@@ -384,11 +414,7 @@ class TestCancelledRequest(FrappeTestCase):
 
 		with (
 			self.patched_get_doc(cancelled, live),
-			mock.patch.object(
-				frappe,
-				"get_all",
-				return_value=[{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}],
-			),
+			self.live_rows([{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}]),
 		):
 			self.assertEqual(api._pay(data, order), "/orders/1")
 
@@ -403,7 +429,7 @@ class TestCancelledRequest(FrappeTestCase):
 
 		with (
 			self.patched_get_doc(cancelled),
-			mock.patch.object(frappe, "get_all", return_value=[]),
+			self.live_rows([]),
 			mock.patch.object(frappe, "request", SimpleNamespace(get_data=lambda as_text=True: body)),
 		):
 			frappe.local.response = frappe._dict()
@@ -422,11 +448,7 @@ class TestCancelledRequest(FrappeTestCase):
 
 		with (
 			self.patched_get_doc(cancelled, live),
-			mock.patch.object(
-				frappe,
-				"get_all",
-				return_value=[{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}],
-			),
+			self.live_rows([{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}]),
 		):
 			self.assertIsNone(api._pay(data, order))
 
