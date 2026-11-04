@@ -332,6 +332,10 @@ class TestRefund(FrappeTestCase):
 		frappe.set_user("Administrator")
 
 
+def _output(order):
+	return json.loads(frappe.db.get_value("Integration Request", order, "output") or "{}")
+
+
 class TestCancelledRequest(FrappeTestCase):
 	"""Needs a site: a payment made on the page of a request that the shop cancelled meanwhile is not lost."""
 
@@ -380,12 +384,17 @@ class TestCancelledRequest(FrappeTestCase):
 
 		with (
 			self.patched_get_doc(cancelled, live),
-			mock.patch.object(frappe, "get_all", return_value=[{"name": live.name, "grand_total": 4520}]),
+			mock.patch.object(
+				frappe,
+				"get_all",
+				return_value=[{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}],
+			),
 		):
 			self.assertEqual(api._pay(data, order), "/orders/1")
 
 		self.assertEqual(self.paid, [live.name])
 		self.assertEqual(frappe.db.get_value("Integration Request", order, "reference_docname"), live.name)
+		self.assertEqual(_output(order)["cancelled_request"], cancelled.name)
 
 	def test_without_a_live_request_nothing_is_booked_and_the_integration_request_says_so(self):
 		cancelled = self.fake_request("Cancelled", 2)
@@ -402,4 +411,52 @@ class TestCancelledRequest(FrappeTestCase):
 
 		self.assertEqual(self.paid, [])
 		self.assertEqual(frappe.db.get_value("Integration Request", order, "status"), "Completed")
-		self.assertIn("unbooked", frappe.db.get_value("Integration Request", order, "output"))
+		self.assertIn("unbooked", _output(order))
+		self.assertEqual(_output(order)["cancelled_request"], cancelled.name)
+
+	def test_a_booking_that_raises_marks_the_payment_and_links_nothing(self):
+		cancelled, live = self.fake_request("Cancelled", 2), self.fake_request("Requested", 1)
+		live.run_method.side_effect = frappe.ValidationError("cannot book")
+		order = self.order_for(cancelled)
+		data = {"reference_doctype": "Payment Request", "reference_docname": cancelled.name, "amount": 4520}
+
+		with (
+			self.patched_get_doc(cancelled, live),
+			mock.patch.object(
+				frappe,
+				"get_all",
+				return_value=[{"name": live.name, "grand_total": 4520, "outstanding_amount": 4520}],
+			),
+		):
+			self.assertIsNone(api._pay(data, order))
+
+		self.assertEqual(
+			frappe.db.get_value("Integration Request", order, "reference_docname"), cancelled.name
+		)
+		self.assertIn("unbooked", _output(order))
+
+	def test_the_check_of_the_state_asks_about_a_cancelled_integration_request_and_books_it_once(self):
+		from wayforpay import reconcile
+
+		cancelled = self.fake_request("Cancelled", 2)
+		order = self.order_for(cancelled)
+		frappe.db.set_value(
+			"Integration Request",
+			order,
+			{"status": "Cancelled", "creation": frappe.utils.add_to_date(None, minutes=-30)},
+		)
+
+		with mock.patch.object(reconcile, "reconcile_payment", return_value="Approved") as asked:
+			self.assertEqual(reconcile.reconcile()[order], "Approved")
+		self.assertIn(mock.call(order), asked.call_args_list)
+
+		data = signature.parse_notification(notification(order))
+		with (
+			mock.patch.object(reconcile, "check_status", return_value=data),
+			mock.patch.object(api, "_pay", return_value="/orders/1") as pay,
+		):
+			self.assertEqual(reconcile.reconcile_payment(order), "Approved")
+			reconcile.reconcile_payment(order)  # the next hour: Completed, nothing is booked twice
+
+		pay.assert_called_once()
+		self.assertEqual(frappe.db.get_value("Integration Request", order, "status"), "Completed")

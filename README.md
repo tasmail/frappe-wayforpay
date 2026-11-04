@@ -33,11 +33,21 @@ pays on the first page of WayForPay. The notification of that payment names the 
 refuses to update. The app does not lose the money and does not cancel or create anything:
 
 - the payment is booked (`on_payment_authorized`) on the live Payment Request of the same document: docstatus 1, status
-  `Requested` or `Pending`, the same currency and a `grand_total` equal to the paid amount (tolerance 0.005); the
-  newest one wins. The Integration Request is linked to the request that was booked (`reference_docname`);
-- when no request fits, the Integration Request stays `Completed` (the money is received) and its output carries
-  `unbooked`; an Error Log "WayForPay: payment received for a cancelled request, book manually" and a comment on the
-  document of the request tell a manager to book the payment by hand. The hourly reconcile skips such a payment.
+  `Requested` or `Initiated`, the same currency, and an amount equal to the paid one within 0.005; the newest wins.
+  `Initiated` is included because ERPNext sets it on every request that has a payment url (every request made for a
+  gateway account), so it is as payable as `Requested`. `Pending` is not a status of a Payment Request.
+- the amount compared is the one that booking pays, the `outstanding_amount` of the live request (its `grand_total` when
+  that is empty): a partly paid request is matched by what is still owed.
+- the Integration Request is linked to the booked request (`reference_docname`) only after the booking has succeeded, and
+  its output keeps the name of the cancelled one (`cancelled_request`) for the audit.
+- when no request fits, or the booking raises, the Integration Request stays `Completed` (the money is received) and its
+  output carries `unbooked`; an Error Log "WayForPay: payment received for a cancelled request, book manually" and a
+  comment on the document of the request tell a manager to book the payment by hand. The hourly reconcile skips it.
+- a notification that was lost for such a payment is recovered too: ERPNext sets the Integration Requests of a request
+  that it cancels to `Cancelled`, and the hourly reconcile asks WayForPay about them (as about `Queued` ones, for three
+  days) and books the answer through the same logic. A booked payment is `Completed` and a repeated answer changes
+  nothing; a payment that was never made is answered "declined" or unknown and is dropped after the three days.
 
-The choice is `wayforpay.api.pick_live`; its tests are pure Python (`wayforpay/tests/test_cancelled.py`), the booking
-is tested in `test_flow.py` (needs a site).
+The choice is `wayforpay.api.pick_live`; its tests and those of the booking are mocked Python
+(`wayforpay/tests/test_cancelled.py`, no site needed and no global state touched); the flow through the notification and
+the reconcile is tested in `test_flow.py` (needs a site).

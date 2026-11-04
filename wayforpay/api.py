@@ -11,7 +11,11 @@ from wayforpay import checkout, signature
 
 SUCCESS = ("Approved",)
 FAILURE = ("Declined", "Expired")
-LIVE_STATUSES = ["Requested", "Pending"]  # the open states of a Payment Request that can still be paid
+# The open states of a submitted Payment Request that can still be paid. ERPNext sets Initiated when the request
+# has a payment url (the case of every request made for a gateway account), so it is bookable like Requested.
+LIVE_STATUSES = ["Requested", "Initiated"]
+# The keys of the output of an Integration Request that tell a manager what happened to a payment.
+AUDIT = ("unbooked", "cancelled_request")
 AMOUNT_TOLERANCE = 0.005
 REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -72,12 +76,10 @@ def record(request, order: dict, data: dict):
 	if status in SUCCESS:
 		request.db_set("status", "Completed", update_modified=True)
 		redirect = _pay(order, request.name)
-		# a payment that no live request could take stays visible in the Integration Request
-		unbooked = frappe.flags.pop("wayforpay_unbooked", None)
-		request.db_set(
-			"output",
-			json.dumps({**output, "redirect_to": redirect, **({"unbooked": unbooked} if unbooked else {})}),
-		)
+		# what _pay wrote about a payment it could not book (or booked elsewhere) stays in the output
+		kept = _stored_output(request.name)
+		audit = {key: kept[key] for key in AUDIT if key in kept}
+		request.db_set("output", json.dumps({**output, "redirect_to": redirect, **audit}))
 	elif status in FAILURE:
 		request.db_set("status", "Failed", update_modified=True)
 		request.db_set("output", json.dumps(output))
@@ -163,62 +165,79 @@ def _pay(order: dict, reference: str = "") -> str | None:
 			return frappe.get_attr(handler)(order, reference)
 		document = frappe.get_doc(doctype, name)
 		if doctype == "Payment Request" and document.docstatus == 2:
-			document = _live_request(document, order, reference)
-			if not document:
-				return None
+			return _pay_cancelled(document, order, reference)
 		return document.run_method("on_payment_authorized", "Completed")
 	except Exception:
 		frappe.log_error(title="WayForPay: the paid document was not updated", message=frappe.get_traceback())
+		_note(reference, unbooked="the paid document was not updated, see the Error Log: book it manually")
 		return None
 
 
-def pick_live(candidates: list[dict], amount: float) -> str | None:
-	"""The name of the request that takes a payment of `amount`: the newest whose total equals it, or None.
+def _stored_output(reference: str) -> dict:
+	return json.loads(frappe.db.get_value("Integration Request", reference, "output") or "null") or {}
 
-	`candidates` are the live requests of the document (newest first), each a dict with `name` and `grand_total`.
+
+def _note(reference: str, **audit):
+	"""Write what happened to a payment into the output of its Integration Request (kept by `record`)."""
+	frappe.db.set_value(
+		"Integration Request",
+		reference,
+		"output",
+		json.dumps({**_stored_output(reference), **audit}),
+		update_modified=False,
+	)
+
+
+def booked_amount(candidate: dict) -> float:
+	"""What booking a Payment Request pays: its outstanding amount (ERPNext books that), else its total."""
+	outstanding = candidate.get("outstanding_amount")
+	return flt(outstanding if outstanding is not None else candidate.get("grand_total"))
+
+
+def pick_live(candidates: list[dict], amount: float) -> str | None:
+	"""The name of the request that takes a payment of `amount`: the newest whose booked amount equals it, or None.
+
+	`candidates` are the live requests of the document (newest first), each a dict with `name`, `grand_total`
+	and `outstanding_amount`.
 	"""
 	for candidate in candidates:
-		if abs(flt(candidate.get("grand_total")) - flt(amount)) < AMOUNT_TOLERANCE:
+		if abs(booked_amount(candidate) - flt(amount)) < AMOUNT_TOLERANCE:
 			return candidate["name"]
 	return None
 
 
-def _live_request(cancelled, order: dict, reference: str):
-	"""The live Payment Request that a payment made for a cancelled one is booked on; None when there is none.
+def _pay_cancelled(cancelled, order: dict, reference: str) -> str | None:
+	"""Book a payment made for a cancelled Payment Request on the live request of the same document.
 
 	The shop cancels the open request of an order when the customer asks to pay again, and the customer may still
-	pay on the first page of the gateway. The money is real, so it is booked on the live request of the same
-	document with the same currency and the paid amount. Nothing is created or cancelled here: when no request
-	fits, the failure is written where a manager sees it (Error Log, a comment on the document, the output of the
-	Integration Request) and the payment is left to be booked by hand.
+	pay on the first page of the gateway. The money is real, so it goes to the live request that fits (see
+	_live_request). The Integration Request is linked to that request only after the booking has succeeded, and keeps
+	the name of the cancelled one. When nothing fits, or the booking raises, the payment is marked `unbooked`.
 	"""
-	candidates = frappe.get_all(
-		"Payment Request",
-		filters={
-			"reference_doctype": cancelled.reference_doctype,
-			"reference_name": cancelled.reference_name,
-			"docstatus": 1,
-			"status": ["in", LIVE_STATUSES],
-			"currency": cancelled.currency,
-		},
-		fields=["name", "grand_total"],
-		order_by="creation desc",
-	)
-	name = pick_live(candidates, flt(order.get("amount")))
-	if name:
-		frappe.db.set_value(
-			"Integration Request",
+	live = _live_request(cancelled, order, reference)
+	if not live:
+		return None
+	try:
+		redirect = live.run_method("on_payment_authorized", "Completed")
+	except Exception:
+		frappe.log_error(title="WayForPay: the paid document was not updated", message=frappe.get_traceback())
+		_unbooked(
+			cancelled,
 			reference,
-			{"reference_docname": name},
-			update_modified=False,
+			f"Payment {reference} was received for the cancelled request {cancelled.name} and booking it on "
+			f"{live.name} failed (see the Error Log): book it manually.",
 		)
-		return frappe.get_doc("Payment Request", name)
-	message = (
-		f"Payment {reference} of {order.get('amount')} {order.get('currency')} was received for the cancelled "
-		f"request {cancelled.name}, and no live request of {cancelled.reference_doctype} "
-		f"{cancelled.reference_name} fits: book it manually."
+		return None
+	frappe.db.set_value(
+		"Integration Request", reference, "reference_docname", live.name, update_modified=False
 	)
-	frappe.flags.wayforpay_unbooked = message
+	_note(reference, cancelled_request=cancelled.name)
+	return redirect
+
+
+def _unbooked(cancelled, reference: str, message: str):
+	"""Make a payment that nothing booked visible: the output of its Integration Request, the Error Log and a comment."""
+	_note(reference, unbooked=message, cancelled_request=cancelled.name)
 	frappe.log_error(
 		title="WayForPay: payment received for a cancelled request, book manually",
 		message=message,
@@ -231,6 +250,36 @@ def _live_request(cancelled, order: dict, reference: str):
 		frappe.log_error(
 			title="WayForPay: the comment on the document was not added", message=frappe.get_traceback()
 		)
+
+
+def _live_request(cancelled, order: dict, reference: str):
+	"""The live Payment Request that takes a payment made for a cancelled one, or None (the failure is then written).
+
+	Live means: the same document, docstatus 1, status Requested or Initiated, the same currency, and a booked
+	amount (outstanding amount) equal to the paid amount. Nothing is created or cancelled here.
+	"""
+	candidates = frappe.get_all(
+		"Payment Request",
+		filters={
+			"reference_doctype": cancelled.reference_doctype,
+			"reference_name": cancelled.reference_name,
+			"docstatus": 1,
+			"status": ["in", LIVE_STATUSES],
+			"currency": cancelled.currency,
+		},
+		fields=["name", "grand_total", "outstanding_amount"],
+		order_by="creation desc",
+	)
+	name = pick_live(candidates, flt(order.get("amount")))
+	if name:
+		return frappe.get_doc("Payment Request", name)
+	_unbooked(
+		cancelled,
+		reference,
+		f"Payment {reference} of {order.get('amount')} {order.get('currency')} was received for the cancelled "
+		f"request {cancelled.name}, and no live request of {cancelled.reference_doctype} "
+		f"{cancelled.reference_name} fits: book it manually.",
+	)
 	return None
 
 

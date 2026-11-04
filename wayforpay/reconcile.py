@@ -60,12 +60,13 @@ def _settled(output: dict) -> bool:
 def reconcile() -> dict:
 	"""The job of the scheduler: every payment that waits for its notification is asked about."""
 	now = frappe.utils.now_datetime()
-	# a payment that waits for its notification, and a payment that was booked and may have been returned since
+	# a payment that waits for its notification, a payment that was booked and may have been returned since, and a
+	# payment whose request ERPNext cancelled (the payer may have paid on its page); the last is booked on the live request
 	rows = frappe.get_all(
 		"Integration Request",
 		filters={
 			"integration_request_service": "WayForPay",
-			"status": ["in", ["Queued", "Completed"]],
+			"status": ["in", ["Queued", "Completed", "Cancelled"]],
 			"creation": ["between", [now - timedelta(days=KEEP_DAYS), now - timedelta(minutes=WAIT_MINUTES)]],
 		},
 		fields=["name", "output"],
