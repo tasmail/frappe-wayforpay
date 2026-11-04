@@ -163,8 +163,47 @@ class TestPayCancelled(Doubles):
 
 		self.assertEqual(self.linked(), [])
 		self.assertIn("returned without a Payment Entry", self.stored["unbooked"])
+		self.assertIn("book it manually", self.stored["unbooked"])
+		self.db.rollback.assert_called_once_with(save_point=api.SAVEPOINT)
 		self.assertEqual(self.stored["cancelled_request"], "PRQ-2")
 		self.comment.assert_called_once()
+
+	def test_a_failed_rollback_of_a_booking_that_returned_says_that_a_payment_entry_may_exist(self):
+		self.live.run_method.side_effect = lambda *args: "/orders/1"
+		self.db.rollback.side_effect = frappe.ValidationError(
+			"no savepoint"
+		)  # a commit in the booking released it
+
+		self.assertIsNone(self.pay([row("PRQ-3")]))
+
+		self.assertIn("the rollback failed", self.stored["unbooked"])
+		self.assertIn("check the existing Payment Entries first", self.stored["unbooked"])
+
+	def test_a_reload_that_raises_leaves_the_booking_unknown_and_unlinked(self):
+		calls = []
+		self.live.reload.side_effect = [None, frappe.ValidationError("gone")]  # before the booking, after it
+		self.db.rollback.side_effect = lambda **kw: calls.append("rollback")
+		self.log.side_effect = lambda **kw: calls.append(kw["title"])
+
+		self.assertIsNone(self.pay([row("PRQ-3")]))
+
+		self.assertEqual(self.linked(), [])
+		self.assertIn("could not be verified", self.stored["unbooked"])
+		self.assertIn("check the existing Payment Entries first", self.stored["unbooked"])
+		self.assertEqual(calls[:2], ["rollback", "WayForPay: the booking could not be verified"])
+		self.assertNotIn("WayForPay: the paid document was not updated", calls)
+
+	def test_the_error_log_of_a_failed_booking_is_written_after_the_rollback(self):
+		calls = []
+		self.live.run_method.side_effect = frappe.ValidationError("cannot book")
+		self.db.rollback.side_effect = lambda **kw: calls.append("rollback")
+		self.log.side_effect = lambda **kw: calls.append("log:" + kw["title"])
+
+		self.assertIsNone(self.pay([row("PRQ-3")]))
+
+		self.assertEqual(
+			calls[:2], ["rollback", "log:WayForPay: the paid document was not updated"]
+		)  # a log written before the rollback would be undone with it
 
 	def test_a_booking_that_only_lowers_the_outstanding_amount_counts_as_made(self):
 		def part(*args):

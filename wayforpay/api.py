@@ -253,8 +253,10 @@ def _pay_cancelled(cancelled, order: dict, reference: str) -> str | None:
 	try:
 		redirect = live.run_method("on_payment_authorized", "Completed")
 	except Exception:
-		frappe.log_error(title="WayForPay: the paid document was not updated", message=frappe.get_traceback())
+		# the traceback is taken first and logged after the rollback, which would undo the row of the Error Log
+		trace = frappe.get_traceback()
 		undone = _rollback()
+		frappe.log_error(title="WayForPay: the paid document was not updated", message=trace)
 		_unbooked(
 			cancelled,
 			reference,
@@ -268,16 +270,35 @@ def _pay_cancelled(cancelled, order: dict, reference: str) -> str | None:
 			+ " Book it manually.",
 		)
 		return None
-	# on_payment_authorized can return without booking (Webshop does so for a disabled cart or a Guest): the request
-	# is booked only when it left the open states or owes less than before
-	live.reload()
-	if live.status in LIVE_STATUSES and booked_amount(live) > before - AMOUNT_TOLERANCE:
-		_rollback()
+	# on_payment_authorized can return without booking (Webshop does so for a disabled cart or a hook): the request is
+	# booked only when it left the open states or owes less than before
+	try:
+		live.reload()
+		booked = not (live.status in LIVE_STATUSES and booked_amount(live) > before - AMOUNT_TOLERANCE)
+	except Exception:
+		trace = frappe.get_traceback()
+		undone = _rollback()
+		frappe.log_error(title="WayForPay: the booking could not be verified", message=trace)
+		_unbooked(
+			cancelled,
+			reference,
+			f"Payment {reference} was received for the cancelled request {cancelled.name}, and the booking on "
+			f"{live.name} could not be verified (see the Error Log): check the existing Payment Entries first, "
+			"then book it manually if there is none." + (" The booking was rolled back." if undone else ""),
+		)
+		return None
+	if not booked:
+		undone = _rollback()
 		_unbooked(
 			cancelled,
 			reference,
 			f"Payment {reference} was received for the cancelled request {cancelled.name}, but the booking on "
-			f"{live.name} returned without a Payment Entry: book it manually.",
+			f"{live.name} returned without a Payment Entry"
+			+ (
+				": book it manually."
+				if undone
+				else "; the rollback failed and a Payment Entry may exist: check the existing Payment Entries first."
+			),
 		)
 		return None
 	try:

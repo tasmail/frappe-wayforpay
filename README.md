@@ -43,11 +43,15 @@ refuses to update. The app does not lose the money and does not cancel or create
 - the chosen request is read again right before booking; when it was paid meanwhile (an `Initiated` request can be
   paid on its own page) nothing is booked and the payment is marked `unbooked`, so the money is never booked twice.
 - the booking runs in a database savepoint. When it raises, it is rolled back to the savepoint, so no half-made Payment
-  Entry stays (a letter that was already sent cannot be taken back). When the rollback itself fails, the note says that
-  the booking may be partly done.
+  Entry stays. Only rows of the database are undone: the callbacks that run after the commit (jobs queued with
+  `enqueue_after_commit`, such as the payment e-mail), documents held in memory, `frappe.flags` and Redis writes are not
+  reverted, and a commit inside the booking destroys the savepoint, so the rollback then fails. The traceback is taken
+  in the `except` block and the Error Log is written after the rollback (before it, the row would be undone with it).
+  When the rollback fails, the note says that a Payment Entry may exist and asks to check the existing ones first.
 - the booking counts as made only when the request, read again afterwards, left the open states or owes less than before:
-  `on_payment_authorized` of Webshop returns without booking for a disabled cart or a Guest, and that must not look like
-  a booked payment. Otherwise the payment is marked `unbooked` ("returned without a Payment Entry") and nothing is linked.
+  `on_payment_authorized` of Webshop returns without booking for a disabled cart or a hook, and that must not look like
+  a booked payment. When the reading itself fails, the booking is unknown: it is rolled back if possible, nothing is
+  linked and the note asks to check the existing Payment Entries first. Otherwise the payment is marked `unbooked` ("returned without a Payment Entry") and nothing is linked.
   The payment of a request that is not cancelled goes the old way, untouched.
 - the Integration Request is linked to the booked request (`reference_docname`) only after the booking has succeeded, and
   its output keeps the name of the cancelled one (`cancelled_request`) for the audit. A failure of this bookkeeping is
