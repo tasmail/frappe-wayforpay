@@ -11,6 +11,10 @@ Webshop) can be paid through it like through Stripe.
   signature (HMAC-MD5 with the secret key) matches and its amount and currency are those of the order; a repeated
   notification pays nothing twice. The payer returns to `/wayforpay_result`, which waits for the notification and goes
   to the success or the failure page.
+- The payer comes back by a cross-site POST to `/api/method/wayforpay.api.returned` (returnUrl), which redirects to
+  `/wayforpay_result`. The browser does not send the `sid` cookie (SameSite=Lax) with it, so Frappe sees a Guest and
+  would overwrite the cookies of a logged in payer with Guest ones; `returned` therefore clears the cookies of the
+  response and sets none, and the payer stays logged in. Do not change the cookies to SameSite=None for this.
 - Currencies: UAH, USD, EUR.
 - Without the `payments` app (a site that is not a shop) the gateway still works: the code that starts a payment
   names a function in the data of the order (`on_paid`, a dotted path), and the notification calls it with the order

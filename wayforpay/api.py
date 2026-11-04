@@ -159,10 +159,25 @@ def _pay(order: dict, reference: str = "") -> str | None:
 		return None
 
 
+def _keep_cookies_of_the_browser():
+	"""Make the answer set no cookie at all.
+
+	The POST of the gateway is cross-site, so the browser leaves the `sid` cookie (SameSite=Lax) out of it and Frappe
+	serves the request as Guest. The cookie manager then writes `sid=Guest`, `user_id=Guest`, `full_name`, `user_image`
+	and `system_user` into the answer, which would replace the real cookies of a logged in payer. Nothing adds them
+	again after the endpoint: the cookies are written by `process_response` from this very manager.
+	"""
+	manager = getattr(frappe.local, "cookie_manager", None)
+	if manager:
+		manager.cookies.clear()
+		del manager.to_delete[:]
+
+
 @frappe.whitelist(allow_guest=True)
 def returned():
 	"""The payer comes back from WayForPay (returnUrl, a POST): the page of the result waits for the notification."""
 	reference = str(frappe.form_dict.get("orderReference") or "")
+	_keep_cookies_of_the_browser()
 	frappe.local.response["type"] = "redirect"
 	frappe.local.response["location"] = (
 		checkout.result_url(reference) if REFERENCE.match(reference) else get_url("/")
